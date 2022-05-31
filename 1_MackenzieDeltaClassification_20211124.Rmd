@@ -95,7 +95,7 @@ lakes.shapeFile = "mackenzieGoodLakes.shp"
 islands.shapeFile = "vectorIslandArea2.shp"
 setwd(shapeFiles.filePath)
 lakes.sf = st_read(lakes.shapeFile)
-islands.sf=st_read(islands.shapeFile)
+islands.sf=st_read(islands.shapeFile) 
 
 # 
 # # Name of file and folder for GECI validation data
