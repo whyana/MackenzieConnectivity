@@ -78,7 +78,7 @@ return(wl)
 # Names of files and folders for reflectance data
 import.filePath = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/GEE Downloads"
 import.Lakes = "MackenzieLakeExport_20210914.csv"
-import.channels = "MackenzieChannelExport_20220525.csv"
+import.channels = "MackenzieChannelExport_20220527.csv"
 # 
 # #Name of file and folder for classification export
 # export.filePath = "E:/Research/DeltaicConnectivity/ColvilleDelta/Data/Outputs"
@@ -95,7 +95,7 @@ lakes.shapeFile = "mackenzieGoodLakes.shp"
 islands.shapeFile = "vectorIslandArea2.shp"
 setwd(shapeFiles.filePath)
 lakes.sf = st_read(lakes.shapeFile)
-islands.sf=st_read(islands.shapeFile) 
+islands.sf=st_read(islands.shapeFile)
 
 # 
 # # Name of file and folder for GECI validation data
@@ -234,14 +234,14 @@ rm(channels.combo, lakes.combo, joined.df)
 gc()
 
 setwd("C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/intermediaryDownloads")
-write_rds(channels.lakes, "joinedData_20220526.Rdata")
+write_rds(channels.lakes, "joinedData_20220527.Rdata")
 
 ```
 
 # Prep data for  testing and training
 ```{r}
 setwd("C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/intermediaryDownloads")
-channels.lakes=read_rds("joinedData_20220526.Rdata")
+channels.lakes=read_rds("joinedData_20220527.Rdata")
 
 goodLakes.val = channels.lakes %>% as_tibble() %>% filter(year %in% highest.maxDis.yrs) %>% 
   group_by(OBJECTID) %>% summarise(no_obs = n()) %>% filter(no_obs>10)
@@ -383,7 +383,7 @@ tree_tuning %>% collect_metrics() %>%
   ggplot()+geom_point(aes(x=min_n, y=mean, color=as.factor(tree_depth), size=cost_complexity), alpha=0.3)+facet_wrap(~.metric)
 ##select the best model based on accuracy (it is the same model whether we pick using accuracy or roc_auc)
 best_tree = tree_tuning %>% 
-  select_best(metric="roc_auc")
+  select_best(metric="accuracy")
 best_tree
 
 # Finalize workflow with the new tuned parameters
@@ -453,7 +453,7 @@ tune.res %>%
 # Tune again using info from prior tuning
 set.seed(456)
 rf.grid= grid_regular(
-  mtry(range=c(0,5)),
+  mtry(range=c(0,10)),
   min_n(range=c(10,30)),
   levels = 5
 )
@@ -498,8 +498,14 @@ final.res %>% collect_predictions() %>%
   ggplot(aes(x=med_Nsmi_ratio_m,y=med_Gb_ratio_m, color=correct))+
   geom_point(size=3, alpha=0.4)+labs(color=NULL)+scale_color_manual(values=c("gray80", "darkred"))+theme_bw()
 final.pred.rf= final.res %>% collect_predictions()
+
+setwd("C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/intermediaryDownloads")
+write_rds(final.pred.rf, "predictions_traintest_31052022.Rdata")
+
+
 conf_mat(final.pred.rf, truth = classes, estimate = .pred_class)
-confusionMatrix(final.pred.rf$.pred_class, final.pred.rf$classes)
+table=confusionMatrix(final.pred.rf$.pred_class, final.pred.rf$classes)
+
 
 
 ## plot the training/testing dataset on a map
@@ -519,7 +525,35 @@ rf.class = cbind(predict(fitted.wf.rf, geci.val), geci.val) %>% as_tibble() %>% 
 
 ggplot(rf.class)+geom_bar(aes(x=group, fill=class), 
                           stat="count", position="dodge") +
-  facet_wrap(~split)
+  facet_wrap(~split)+theme_bw()
+
+install.packages("remotes")
+remotes::install_github("davidsjoberg/ggsankey")
+library(ggsankey)
+#https://r-charts.com/flow/sankey-diagram-ggplot2/
+install.packages("plotly")
+library(plotly)
+
+prep=cbind(predict(fitted.wf.rf, geci.val), geci.val) %>% as_tibble() %>% select(OBJECTID, .pred_class, classes)%>% rename(.obs_class = classes) %>% 
+  mutate(split=case_when(
+    OBJECTID %in% train.ids~"train", 
+    OBJECTID %in% test.ids~"test"),
+    .pred_class=as.numeric(.pred_class),
+    .obs_class = as.numeric(.obs_class)) %>% 
+#  dplyr::group_by(split, .pred_class, .obs_class) %>% summarise(count=n()) %>% ungroup() %>% filter(split=="train") %>% 
+  select(-split, -OBJECTID) %>% 
+  make_long(.obs_class,.pred_class)
+
+ggplot(prep, aes(x = x, 
+               next_x = next_x, 
+               node = node, 
+               next_node = next_node,
+               fill = factor(node),
+               label=node)) +
+  geom_sankey(flow.alpha = 0.75, node.color = 1) +
+  geom_sankey_label(size = 3.5, color = 1, fill = "white")+
+  theme_sankey(base_size = 16)
+
 
 ```
 
