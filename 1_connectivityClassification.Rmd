@@ -51,14 +51,9 @@ library(vip)
 # dates for version control
 todayDate  = "20230324" # the first data join phase
 
-# Names of files and folders for reflectance data
-import.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/GEE Downloads"
-import.sword = "na_sword_reaches_hb82_v14.shp"
-
 # intermediate working directory
 int.wd="C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/intermediaryDownloads"
 refl.import = 'srCorrected_mackLakes_20230324.feather'
-refl.import.raw = 'srMunged_Original_mackLakes_20230324.feather'
 
 #Name of file and folder for lake shapefiles & island polygon shapefiles
 shapeFiles.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/shapeFiles"
