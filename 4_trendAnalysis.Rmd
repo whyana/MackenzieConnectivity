@@ -48,22 +48,22 @@ library(vip)
 todayDate  = "20230324" # the first data join phase
 
 # Names of files and folders for reflectance data
-import.filePath = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/GEE Downloads"
+import.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/GEE Downloads"
 import.sword = "na_sword_reaches_hb82_v14.shp"
 
 # intermediate working directory
-int.wd="C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/intermediaryDownloads"
+int.wd="C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/intermediaryDownloads"
 refl.import = 'srCorrected_mackLakes_202303138.feather'
 
 #Name of file and folder for lake shapefiles & island polygon shapefiles
-shapeFiles.filePath = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/shapeFiles"
+shapeFiles.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/shapeFiles"
 lakes.shapeFile = "mackenzieGoodLakes.shp"
 islands.shapeFile = "vectorIslandArea2.shp"
 setwd(shapeFiles.filePath)
 lakes.sf = st_read(lakes.shapeFile)
 islands.sf=st_read(islands.shapeFile)
 
-images.wd = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/images"
+images.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/images"
 
 ```
 
@@ -71,10 +71,13 @@ images.wd = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel H
 ```{r}
 crs.plot = "+proj=tcea +lon_0=-134.3847656 +datum=WGS84 +units=m +no_defs"
 setwd(shapeFiles.filePath)
+
 study.area.large=cbind.data.frame(lon=c(-136.80, -136.80, -133.47, -133.47), 
                  lat=c(67.25, 69.55, 69.55, 67.46)) %>% 
-  st_as_sf(coords=c("lon", "lat")) %>% st_set_crs(4326) %>% st_bbox() %>% st_as_sfc() %>% 
+  st_as_sf(coords=c("lon", "lat")) %>% st_set_crs(4326) %>% 
+  st_bbox() %>% st_as_sfc() %>% 
   st_transform(crs = crs.plot)
+
 mack.basin.large = st_read(import.sword) %>% 
   st_transform(crs = crs.plot) %>% 
   st_intersection(study.area.large) %>% dplyr::filter(width>90)
@@ -82,13 +85,12 @@ mack.basin.large = st_read(import.sword) %>%
 # import classifications
 setwd(int.wd)
 all.classified.filter = read_feather(paste0("final.class_", todayDate, ".feather")) 
-#all.classified.filter.raw = readRDS(paste0("final.class_raw_", todayDate, ".Rdata"))
 ```
 
 # Trend analysis for calibrated reflected
 ## Prep lake connectivity classifications for trend analysis
 ```{r}
-# group lakes within two temporal groups and summarize mean yearly connectivity
+# group lakes within two temporal groups and summarize mean annual connectivity in each month
 results.summary.subgroups = all.classified.filter %>% lazy_dt() %>% 
   dplyr::select(.pred_class, OBJECTID, year, month) %>% 
   mutate(yeargroup = case_when(
@@ -180,6 +182,7 @@ write_feather(trend.data %>% as_tibble() %>% select(-geometry),
 ```
 
 ## Analyze/plot trends in connectivity
+### plots not included in manuscript
 ```{r}
 # Print a summary of trend results
 setwd(int.wd)
@@ -196,8 +199,8 @@ june.spread %>% na.omit()
 
 row.combo %>% as_tibble()%>% 
   mutate(trend = case_when(
-    tau>0 & pval < 0.05 ~ "increasing connectivity trend",
-    tau<0 & pval < 0.05~ "decreasing connectivity trend",
+    tau>0 & pval < 0.05 ~ "increasing sig. connectivity trend",
+    tau<0 & pval < 0.05~ "decreasing sig. connectivity trend",
     pval>0.05 ~ "no monotonic trend",
     is.na(tau) & class == "always less than 0.66" ~ "always less than 0.66",
     is.na(tau) & class == "always 0.66-1.33" ~ "always 0.66-1.33",
@@ -210,215 +213,6 @@ row.combo %>% as_tibble()%>%
 row.combo %>% filter(!is.na(tau)&month==6) %>% 
   mutate(group = case_when(tau<0 ~ "lt 0", tau> 0 ~ "gt 0", tau==0 ~ "0")) %>% 
   group_by(yeargroup, group) %>% count()
-
-
-# Plot lakes w/ significant trends
-sig.trend = ggplot(data=trend.data %>% filter(!is.na(tau)) %>% 
-                     filter(month==6 & pval <= 0.05))+
-  geom_sf(data=mack.basin.large, color="grey75", size=0.01)+
-  geom_sf(aes(fill=tau), color=NA)+
-   scale_fill_gradientn(
-   colors=c("blue","grey85","red"),
-   values=scales::rescale(c(-1,0,1)),
-   limits=c(-1,1)
-  )+
-  theme_bw()+
-  annotation_scale(text_cex = 0.9)+
-  theme(axis.text.x = element_text(angle=45, hjust=1, size=12),
-        strip.text = element_text(size=14, face="bold"),
-        title = element_text(size=14, face="bold"),
-        axis.text.y = element_text(size=12),
-        legend.title = element_text(size=12),
-        legend.text=element_text(size=10),
-        legend.position = "bottom",
-        legend.justification = "center")+labs(fill="Trend")+
-  #guides(fill=guide_legend(nrow=1, legend.justification="center"))+
-  facet_wrap(~yeargroup)+labs(fill="Kendall's Tau")+
-  ggtitle("Lakes with significant trends (p<0.05)")
-
-# plot all lakes that have some sort of trend, even if it isn't statistically significant
-some.trend = ggplot(data=trend.data %>% filter(!is.na(tau)))+
-  geom_sf(data=mack.basin.large, color="grey75", size=0.01)+
-  geom_sf(aes(fill=tau), color=NA)+
-   scale_fill_gradientn(
-   colors=c("blue","grey85","red"),
-   values=scales::rescale(c(-1,0,1)),
-   limits=c(-1,1)
-  )+
-  theme_bw()+
-  #annotation_scale(text_cex = 0.9)+
-  theme(axis.text.x = element_text(angle=45, hjust=1, size=12),
-        strip.text = element_text(size=14, face="bold"),
-        title = element_text(size=14, face="bold"),
-        axis.text.y = element_text(size=12),
-        legend.title = element_text(size=12),
-        legend.text=element_text(size=10),
-        legend.position = "bottom",
-        legend.justification = "center")+labs(fill="Trend")+
-  #guides(fill=guide_legend(nrow=1, legend.justification="center"))+
-  facet_grid(vars(yeargroup),vars(month))+labs(fill="Kendall's Tau")+
-  ggtitle("All lakes with variable connectivity")
-# plot all low variability lakes
-low.var = ggplot(data=trend.data %>% filter(is.na(tau)) %>% 
-                     filter(month==6))+
-  geom_sf(data=mack.basin.large, color="grey75", size=0.01)+
-  geom_sf(aes(fill=class), color=NA)+
-  #  scale_fill_gradientn(
-  #  colors=c("blue","grey85","red"),
-  #  values=scales::rescale(c(-1,0,1)),
-  #  limits=c(-1,1)
-  # )+
-  theme_bw()+
-  annotation_scale(text_cex = 0.9)+
-  theme(axis.text.x = element_text(angle=45, hjust=1, size=12),
-        strip.text = element_text(size=14, face="bold"),
-        title = element_text(size=14, face="bold"),
-        axis.text.y = element_text(size=12),
-        legend.title = element_text(size=12),
-        legend.text=element_text(size=10),
-        legend.position = "bottom",
-        legend.justification = "center")+labs(fill="Trend")+
-  #guides(fill=guide_legend(nrow=1, legend.justification="center"))+
-  facet_wrap(~yeargroup)+labs(fill="Kendall's Tau")+
-  ggtitle("All lakes with low variability")
-
-sig.trend / some.trend 
-
-setwd(images.wd)
-ggsave(paste0(todayDate,"_lakeTrendAll.png"), width=6, height=10, units="in")
-
-```
-
-# Calculate trends using raw classifications
-## Prep lake connectivity classifications for trend analysis
-```{r}
-# group lakes within two temporal groups and summarize mean yearly connectivity
-results.summary.subgroups.raw = all.classified.filter.raw %>% lazy_dt() %>% 
-  dplyr::select(.pred_class, OBJECTID, year, month) %>% 
-  mutate(yeargroup = case_when(
-    year>=1984 & year<=1999 ~ "1984-1999",
-    year>=2000 & year<=2022 ~ "2000-2022"
-  )) %>% filter(!is.na(yeargroup)) %>% 
-  group_by(OBJECTID, month, year, yeargroup)%>% 
-  summarise(class.mean = mean(as.numeric(as.character(.pred_class)), na.rm=T),
-            count=n()) %>% ungroup()
-# calculate average yearly connectivity for all years
-results.summary.all.raw = all.classified.filter.raw %>% lazy_dt() %>% 
-  dplyr::select(.pred_class, OBJECTID, year, month) %>% 
-  mutate(yeargroup = "all") %>% 
-  group_by(OBJECTID, month, year, yeargroup)%>% 
-  summarise(class.mean = mean(as.numeric(as.character(.pred_class)), na.rm=T),
-            count=n()) %>% ungroup()
-rm(all.classified.filter.raw)
-gc()
-# Combine the two dataframes together
-results.summary.raw = rbind.data.frame(results.summary.subgroups.raw %>% as_tibble(), 
-                                   results.summary.all.raw %>% as_tibble())
-rm(results.summary.all.raw, results.summary.subgroups.raw)
-gc()
-
-# group by time period, count number of years of data each lake has in each month in each period
-good.ids.raw = results.summary.raw %>% 
-  group_by(OBJECTID, month, yeargroup) %>%count() %>% ungroup() %>% 
-  filter(n>=10) 
-# select only lakes that have at least 10 obs in all periods
-best.ids.raw = good.ids.raw %>% group_by(OBJECTID, month) %>% count() %>% ungroup() %>% filter(n==3)
-
-# Apply the best.ids filter, and group observations by lake, month, and yeargroup
-nested.data.raw = results.summary.raw %>%
-  left_join(best.ids.raw, by=c("OBJECTID", "month")) %>% 
-  dplyr::filter(!is.na(n)) %>% 
-  group_by(OBJECTID, month, yeargroup) %>% nest() %>% ungroup() %>% as_tibble()
-
-```
-
-## Apply trend analysis calculations to each lake
-```{r}
-## for each lake, calculate the trend (tau) and pvalue
-row.combo.raw=NULL
-for (i in 1:nrow(nested.data.raw)){
-  dat = nested.data.raw$data[[i]] %>% arrange(year)
-  OBJECTID = nested.data.raw$OBJECTID[[i]]
-  month = nested.data.raw$month[[i]]
-  yeargroup = nested.data.raw$yeargroup[[i]]
-  n.obs = nrow(dat)
-  obs.count = dat %>% group_by(class.mean) %>% count() %>% ungroup() %>% 
-    mutate(all.obs = n.obs,
-           pct = n/n.obs)
-  if(isTRUE(obs.count$pct[obs.count$class.mean<=0.66]>=0.95)){
-    class = "always less than 0.66"
-    col.combo = cbind.data.frame(OBJECTID, month,yeargroup,class, pval=NA, S=NA, tau=NA)
-    row.combo.raw=rbind.data.frame(row.combo.raw, col.combo)
-  } else if(isTRUE(obs.count$pct[obs.count$class.mean>0.66 |obs.count$class.mean<=1.33]>=0.95)){
-    class = "always 0.66-1.33"
-    col.combo = cbind.data.frame(OBJECTID, month,yeargroup,class, pval=NA, S=NA, tau=NA)
-    row.combo.raw=rbind.data.frame(row.combo.raw, col.combo)
-  }else if(isTRUE(obs.count$pct[obs.count$class.mean>1.33]>=0.95)){
-    class = "always >1.33"
-    col.combo = cbind.data.frame(OBJECTID, month,yeargroup,class, pval=NA, S=NA, tau=NA)
-    row.combo.raw=rbind.data.frame(row.combo.raw, col.combo)
-  } else {
-    class = "trendtest"
-    test.obj=MannKendall(dat$class.mean)
-    S=test.obj$S[[1]]
-    tau = test.obj$tau
-    pval = test.obj$sl
-    col.combo = cbind.data.frame(OBJECTID, month,yeargroup, class, pval, S, tau)
-    row.combo.raw=rbind.data.frame(row.combo.raw, col.combo)
-  }
-  
-}
-
-setwd(int.wd)
-write_feather(row.combo.raw, "raw_trend_raw.feather")
-
-row.combo.raw = read_feather("raw_trend_raw.feather")
-
-## Format trend data results
-trend.data.raw=row.combo.raw %>% as_tibble()%>% 
-  mutate(trend = case_when(
-    tau>0 & pval < 0.05 ~ "increasing connectivity trend",
-    tau<0 & pval < 0.05~ "decreasing connectivity trend",
-    pval>0.05 ~ "no monotonic trend")) %>% 
-  left_join(lakes.sf, by="OBJECTID") %>% st_as_sf() %>% 
-   st_transform(crs = crs.plot) %>% 
-  mutate(yeargroup = ifelse(yeargroup=="1984-1990", "1984-1999", yeargroup))
-
-write_feather(trend.data.raw %>% as_tibble() %>% select(-geometry), 
-              paste0(todayDate, "Treds_cal.feather"))
-
-```
-
-
-# calculate average June water level for each 10 year period
-```{r}
-results.sf = all.classified.filter %>% filter(month>=8) %>% 
-  mutate(.pred_class=as.numeric(as.character(.pred_class))) %>% 
-  group_by(year, OBJECTID, month) %>% 
-  summarise(mean.con = mean(.pred_class, na.rm=T),
-            count=n()) %>% 
-  left_join(lakes.sf, by="OBJECTID") %>% st_as_sf() %>% 
-  st_transform(crs.plot)
-
-ggplot(data=results.sf %>% filter(month==8))+geom_sf(aes(fill=mean.con), color=NA)+
-  facet_wrap(~year, nrow=4)+
-  scale_fill_viridis_c()+
-  theme_void()
-
-ggplot(data=results.sf %>% filter(month==9))+geom_sf(aes(fill=mean.con), color=NA)+
-  facet_wrap(~year, nrow=4)+
-  scale_fill_viridis_c()+
-  theme_void()
-
-
-
-# %>% 
-#   mutate(.pred_class=as.numeric(as.character(.pred_class)),
-#          yeargroup = case_when(
-#            year<=1994 
-#          ))
-#   group_by(OBJECTID, month)
-
 
 ```
 
