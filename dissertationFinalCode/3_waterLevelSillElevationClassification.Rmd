@@ -1,0 +1,1810 @@
+---
+title: "3_dischargeAnalysis"
+output: html_document
+date: "2023-03-13"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libraries
+```{r}
+library(tidyverse)
+library(sf)
+library(lubridate)
+library(grDevices)
+library(mapview)
+library(extrafont)
+library(ggpubr)
+library(ggmap)
+library(RgoogleMaps)
+library(broom)
+library(feather)
+library(tidyhydat)
+library(sp)
+library(data.table)
+library(ggalluvial)
+library(patchwork)
+library(magick)
+library(units)
+library(Kendall)
+library(ggspatial)
+library(dtplyr)
+#Import libraries for Random Forest
+library(caret) 
+library(e1071)
+library(Boruta)
+library(tidymodels)
+library(skimr)
+library(vip)
+```
+
+# Import files / set constants
+```{r}
+# dates for version control
+todayDate  = "20230324" # the first data join phase
+
+# Names of files and folders for reflectance data
+import.filePath = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/GEE Downloads"
+import.sword = "na_sword_reaches_hb82_v14.shp"
+
+# intermediate working directory
+int.wd="C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/intermediaryDownloads"
+
+
+#Name of file and folder for lake shapefiles & island polygon shapefiles
+shapeFiles.filePath = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/shapeFiles"
+lakes.shapeFile = "mackenzieGoodLakes.shp"
+islands.shapeFile = "vectorIslandArea2.shp"
+setwd(shapeFiles.filePath)
+lakes.sf = st_read(lakes.shapeFile)
+islands.sf=st_read(islands.shapeFile)
+
+images.wd = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/images"
+
+# import Marsh & Hey Validation
+val.wd = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/MarshHey1988"
+val.filename = "MarshHey1998_prj.shp"
+
+```
+
+# Import river centerlines and set the projection for all future plots, import classifications
+```{r}
+crs.plot = "+proj=tcea +lon_0=-134.3847656 +datum=WGS84 +units=m +no_defs"
+setwd(shapeFiles.filePath)
+study.area.large=cbind.data.frame(lon=c(-136.80, -136.80, -133.47, -133.47), 
+                 lat=c(67.25, 69.55, 69.55, 67.46)) %>% 
+  st_as_sf(coords=c("lon", "lat")) %>% st_set_crs(4326) %>% st_bbox() %>% st_as_sfc() %>% 
+  st_transform(crs = crs.plot)
+mack.basin.large = st_read(import.sword) %>% 
+  st_transform(crs = crs.plot) %>% 
+  st_intersection(study.area.large) %>% dplyr::filter(width>90)
+
+# import classifications
+setwd(int.wd)
+all.classified.filter = read_feather(paste0("final.class_", todayDate, ".feather")) 
+
+```
+
+# Import river water level data
+```{r}
+setwd("C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/dischargeData")
+level.files = list.files(pattern="*.csv")
+
+readfun <- function(x) {
+  dataset <- fread(x,header=TRUE, sep=",", skip=1)
+  #setnames(dataset,c("Name1","Name2"))
+  return(dataset)
+}
+
+# Import water level data keeping good years between 1984-present, correct water levels to CGG05 projection (Véronneau, 2006) - values in Table 2.3 https://central.bac-lac.gc.ca/.item?id=TC-AEU-30267&op=pdf&app=Library&oclc_number=802293902
+level_data <- rbindlist(lapply(level.files,readfun)) %>% 
+  filter(PARAM==2) %>% #keep only water level, not discharge
+  mutate(month=month(Date),
+         year=year(Date),
+         doy = yday(Date)) %>% 
+  filter(month>=4 & month <=9 & year>=1984) %>% 
+  filter(!(ID=="10LC012" & year>=2012 & year<=2013)) %>% 
+  filter(!(ID=="10MC023" & year <=1999)) %>% 
+  mutate(Value = case_when(
+    ID == "10LC002" ~ Value-10.856,
+    ID == "10LC012" ~ Value-9.822,
+    ID == "10LC013" ~ Value-9.713,
+    ID == "10LC014" ~ Value-0.024,
+    ID == "10LC021" ~ Value-9.056,
+    ID == "10MC002" ~ Value+0.074,
+    ID == "10MC003" ~ Value-10.056,
+    ID == "10MC008" ~ Value-10.346,
+    ID == "10MC023" ~ Value-10.603,
+    ID == "10MC011" ~ Value-9.213
+  ))
+
+station.ids = unique(level_data$ID)
+
+level.locations = hy_stations(station=station.ids) %>% 
+  st_as_sf(coords=c("LONGITUDE","LATITUDE")) %>% st_set_crs(4326) %>% 
+  st_transform(crs = crs.plot) %>% 
+  rename(ID=STATION_NUMBER)
+```
+
+#  Complete Functional Sill Elevation Calculation - corrected/calibrated classifications
+```{r}
+# Calculate mean water level at each WSC station
+level.prep = level_data %>% 
+   select(ID, Date, Value) %>% 
+   spread(ID, Value) %>% 
+    na.omit() %>% select(-Date) %>% colMeans() 
+# Get station numbers for all the stations
+col.names = level_data %>% 
+   select(ID, Date, Value) %>% 
+   spread(ID, Value) %>% 
+   na.omit() %>% select(-Date) %>% colnames()
+
+# join the water level to the station location information
+level.prep2 = cbind.data.frame(level.prep %>% as_tibble(), col.names) %>% 
+  rename(ID = col.names) %>% 
+  left_join(level.locations %>% 
+              select(STATION_NAME, ID, geometry), 
+            by="ID") %>% 
+  st_as_sf()
+
+# calculate a distance matrix between all stations
+dist.matrix = st_distance(level.prep2)
+dimnames(dist.matrix) = list(col.names, col.names)
+dist.df = t(combn(colnames(dist.matrix), 2))
+dist.df = data.frame(dist.df, dist = dist.matrix[dist.df])
+
+# calculate a  difference matrix between mean water levels at each station
+dif.matrix = dist(level.prep2$value, diag=T, upper=T) %>% as.matrix()
+dimnames(dif.matrix) = list(col.names, col.names)
+dif.df = t(combn(colnames(dif.matrix), 2))
+dif.df = data.frame(dif.df, dist = dif.matrix[dif.df]) %>% rename(dif = dist)
+
+# combine distance and difference matrices
+dist.dif.df = dist.df %>% left_join(dif.df, by=c("X1", "X2")) %>% as_tibble()
+
+# plot the relationship between distance between stations and differences in water level
+library(measurements)
+dist.dif.df %>% 
+  filter(X1 != "10MC002" &  X1 != "10LC014" & X1!="10LC021" & X1 != "10MC008") %>% 
+  filter(X2 != "10MC002" &  X2 != "10LC014"& X2!="10LC021" & X2 != "10MC008") %>% 
+  mutate(dist = as.numeric(conv_unit(dist,from="m", to="km"))) %>% 
+  ggplot()+geom_point(aes(x=dist, y=dif))+theme_classic()+
+  theme(axis.text = element_text(size=12),
+        axis.title = element_text(size=12, face="bold"))+
+  scale_y_continuous(breaks = c(0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5))+
+  geom_smooth(aes(x=dist, y= dif), method="lm", se=F)+
+  xlab("distance between station pairs [km]")+ylab("difference in average\nwater level between station pairs [m]")+labs(color="WSC Station\nNumber")
+setwd(images.wd)
+ggsave(paste0(todayDate,"_levelDiff.png"), width = 6, height = 5, units = "in")
+
+# filter out the stations that are upstream of the delta, since they behave differently
+dist.dif.df.filt = dist.dif.df %>% 
+  filter(X1 != "10MC002" &  X1 != "10LC014" & X1!="10LC021" & X1 != "10MC008") %>% 
+  filter(X2 != "10MC002" &  X2 != "10LC014"& X2!="10LC021" & X2 != "10MC008") 
+# Calculate the relationship between distance and difference in water level
+dist.dif.mod = lm(dif ~ as.numeric(dist), data =dist.dif.df.filt )
+mod.int = dist.dif.mod$coefficients[[1]]
+mod.slope = dist.dif.mod$coefficients[[2]]
+mod.slope
+# For each station select lakes that are within 50km
+station.buffer = level.locations %>% st_buffer(50000) %>% # buffer by 50km
+  select(ID, STATION_NAME, geometry) %>% 
+  filter(ID != "10MC002" &  ID != "10LC014" &
+           ID != "10LC021" & ID != "10MC008") 
+
+lakes.proj = lakes.sf %>% st_transform(crs.plot) %>% 
+  select(OBJECTID, geometry)
+lake.list = st_intersects(lakes.proj, station.buffer)
+lakes.combo = lakes.proj[lengths(lake.list)>0,] %>% st_join(station.buffer) 
+
+
+# get distances between each lake and the relevant station
+lakes.point = lakes.combo %>% st_centroid()
+station.point = lakes.combo %>% as_tibble() %>% select(ID) %>% 
+  left_join(level.locations, by="ID") %>% 
+  st_as_sf() %>% select(ID)
+
+lake.station.dist = st_distance(lakes.point, station.point, by_element=T) %>% as_tibble()
+
+lakes.station.dist = cbind.data.frame(lakes.combo, lake.station.dist) %>% 
+  as_tibble() %>% rename(dist.m = value) %>% 
+  mutate(dist_error = dist.m * mod.slope)
+
+# combine the lake classifications with the discharge data - slow, need to speed up
+nest.sill = all.classified.filter %>% 
+  left_join(lakes.station.dist %>% as_tibble() %>% select(-geometry), by="OBJECTID") %>% 
+  filter(!is.na(ID)) %>% 
+  mutate(.pred_class = as.numeric(as.character(.pred_class))) %>% 
+  filter(.pred_class !=1) %>% # remove the middle 'catch-all' class
+  left_join(level_data %>% rename(date=Date, Value.0 = Value) %>% 
+              select(ID, Value.0, date) %>% mutate(date=as_date(date)), by=c("date", "ID"))%>% 
+  na.omit() %>% group_by(OBJECTID, ID, 
+                         STATION_NAME,dist_error, dist.m) %>% 
+  nest() %>% ungroup()
+
+# loop through each objectid and station number pair to calculate initial sill elevations
+combo.all = NULL
+for (y in 1:nrow(nest.sill)){
+  df = nest.sill$data[[y]]
+  obj_id = nest.sill$OBJECTID[[y]]
+  stat_id = nest.sill$ID[[y]]
+  stat_nam = nest.sill$STATION_NAME[[y]]
+  dist_error = nest.sill$dist_error[[y]]
+  dist_m = nest.sill$dist.m[[y]]
+  n.obs = nrow(df)
+  obs.count = df %>% group_by(.pred_class) %>% count() %>% ungroup() %>% 
+    mutate(all.obs = n.obs,
+           pct = n/n.obs)
+  
+   # cond1 = isTRUE(obs.count$pct[obs.count$.pred_class==0]>=0.95) &
+   #   nrow(df[df$.pred_class==0,])>=5
+ 
+  
+  if(isTRUE(obs.count$pct[obs.count$.pred_class==0]>=0.95) &
+     nrow(df[df$.pred_class==0,])>=5  ){
+    class = "always 0"
+    combo = cbind.data.frame(obj_id, class, stat_id, stat_nam, dist_m, dist_error, 
+                           num.0=NA, mean.0=NA, sd.0=NA, min.0=NA, max.0=NA, 
+                           num.2=NA, mean.2 = NA, sd.2 =NA, min.2 = NA, max.2 = NA, 
+                           pval=NA)
+    combo.all = rbind.data.frame(combo.all, combo)
+    next
+  }
+  if(isTRUE(obs.count$pct[obs.count$.pred_class==2]>=0.95)& nrow(df[df$.pred_class==2,])>=5){
+    class = "always 2"
+    combo = cbind.data.frame(obj_id, class, stat_id, stat_nam, dist_m, dist_error, 
+                           num.0=NA, mean.0=NA, sd.0=NA, min.0=NA, max.0=NA, 
+                           num.2=NA, mean.2 = NA, sd.2 =NA, min.2 = NA, max.2 = NA, 
+                           pval=NA)
+    combo.all = rbind.data.frame(combo.all, combo)
+    next
+  }
+  if(isTRUE(nrow(df[df$.pred_class==2,])<5) | isTRUE(nrow(df[df$.pred_class==0,])<5)){
+    next
+  }
+  ttest = t.test(df[df$.pred_class == 0,]$Value.0, df[df$.pred_class == 2,]$Value.0 )
+  pval = ttest$p.value
+  if(pval>0.05){
+    class = "no discharge relationship"
+    combo = cbind.data.frame(obj_id, class, stat_id, stat_nam, dist_m, dist_error, 
+                           num.0=NA, mean.0=NA, sd.0=NA, min.0=NA, max.0=NA, 
+                           num.2=NA, mean.2 = NA, sd.2 =NA, min.2 = NA, max.2 = NA, 
+                           pval=pval)
+    combo.all = rbind.data.frame(combo.all, combo)
+    
+    next}
+  num.0 = df[df$.pred_class == 0,] %>% nrow()
+  num.2 = df[df$.pred_class == 2,] %>% nrow()
+  mean.0 = mean(df[df$.pred_class==0,]$Value.0)
+  sd.0 = sd(df[df$.pred_class==0,]$Value.0)
+  min.0 = min(df[df$.pred_class==0,]$Value.0)
+  max.0 = max(df[df$.pred_class==0,]$Value.0)
+  mean.2 = mean(df[df$.pred_class==2,]$Value.0)
+  sd.2 = sd(df[df$.pred_class==2,]$Value.0)
+  min.2 = min(df[df$.pred_class==2,]$Value.0)
+  max.2 = max(df[df$.pred_class==2,]$Value.0)
+  class = "discharge dependant"
+  combo = cbind.data.frame(obj_id, class, stat_id, stat_nam, dist_m, dist_error, 
+                           num.0, mean.0, sd.0, min.0, max.0, 
+                           num.2, mean.2, sd.2, min.2, max.2, 
+                           pval)
+  combo.all = rbind.data.frame(combo.all, combo)
+}
+
+setwd(int.wd)
+write_feather(combo.all, paste0("raw_sillElevation_material.feather"))
+combo.all = read_feather("raw_sillElevation_material.feather")
+
+# calculate sill elevation ranges and the mid point of that range
+combo.sill = combo.all %>% 
+  mutate(xmin = case_when(
+                       max.0>min.2 ~ min.2-as.numeric(dist_error), 
+                       max.0<min.2 ~ max.0-as.numeric(dist_error)
+                     ),
+         xmax = case_when(
+           max.0>min.2 ~ max.0+as.numeric(dist_error),
+           max.0<min.2 ~ min.2 + as.numeric(dist_error)
+                    ),
+         mid.sill = (xmin+xmax)/2) %>% 
+  as_tibble() %>% 
+  select(obj_id, class, stat_id, stat_nam, dist_m, dist_error, xmin, xmax, mid.sill, pval, num.0, num.2) %>% 
+  as_tibble()
+
+# calculate ranges for sills. If two stations produced two different sill groups for a lake, take a peak at what is going on. Keep the class from the station that is closest to the lake
+diffclass.diffstat = combo.sill %>%
+  group_by(obj_id, class) %>% count() %>% ungroup() %>% 
+  group_by(obj_id) %>% count() %>% ungroup()%>% 
+  rename(numclasses = n)
+keep.obs = combo.sill %>% 
+  left_join(diffclass.diffstat, by="obj_id") %>% as_tibble() %>% 
+  filter(numclasses>1) %>% 
+  mutate(classFactor = factor(class, levels = c("discharge dependant", "always 0", "always 2", "no discharge relationship"))) %>% 
+  group_by(obj_id,classFactor, class) %>% count() %>% ungroup() %>% 
+  arrange(obj_id, classFactor) %>% 
+  group_by(obj_id) %>% filter(row_number()==1) %>% 
+  select(obj_id, class) %>% 
+  mutate(keep.type = "keep")
+combo.prep = combo.sill %>% 
+  left_join(diffclass.diffstat, by="obj_id") %>% 
+  left_join(keep.obs, by=c("obj_id", "class")) %>% as_tibble() %>% 
+  filter(numclasses == 1 | (numclasses >1 & !is.na(keep.type)))
+  
+
+
+# for the lakes that are in 50km of multiple stations that all are able to calculate sill elevation ranges, compare the sill elevation ranges to see if they overlap
+compare.sills = combo.prep%>% as_tibble() %>% 
+  filter(!is.na(mid.sill)) %>%
+  select(obj_id, stat_id, dist_m, mid.sill, xmin, xmax) %>% 
+  group_by(obj_id) %>% nest()
+return_all = NULL
+for (b in 1:nrow(compare.sills)){
+  sill.df = compare.sills$data[[b]] %>% arrange(dist_m) %>% as.data.table()
+  obj_id = compare.sills$obj_id[[b]]
+  len = nrow(sill.df)
+  results = cbind.data.frame(obj_id, len, sill.df[, .(max(xmin), min(xmax))])
+  return_all = rbind.data.frame(return_all, results)
+}
+sill.compare = combo.prep %>% 
+  left_join(return_all, by="obj_id") %>% 
+  mutate(diff = V2-V1,
+         fin.min = case_when(
+           !is.na(V1) & diff>0 ~ V1,
+           !is.na(V1) & diff<0 ~ -999
+         ),
+         fin.max = case_when(
+           !is.na(V2) & diff>0 ~ V2,
+           !is.na(V2) & diff<0  ~ -999
+         )) %>% select(obj_id, class,fin.min, fin.max, stat_id) %>%arrange(obj_id) %>% 
+  group_by(obj_id) %>% 
+  mutate(rnm = row_number()) %>% 
+  spread(rnm, stat_id) %>% 
+  rename(STATION_1 = `1`, STATION_2 = `2`, STATION_3 = `3`, STATION_4 = `4`) %>% 
+  mutate(fin.range = ifelse(fin.max == -999 | 
+                              fin.min ==-999, NA, 
+                            fin.max-fin.min),
+       fin.sill = ifelse(fin.max == -999 | 
+                              fin.min ==-999, NA, 
+                            (fin.max+fin.min)/2)) 
+
+
+setwd(int.wd)
+write_feather(sill.compare,paste0(todayDate, "sillElevation_c.feather"))
+sill.compare = read_feather(paste0(todayDate, "sillElevation_c.feather"))
+
+
+demo.plot= sill.compare %>% left_join(nest.sill %>% rename(obj_id=OBJECTID), by="obj_id") %>%filter(fin.range<1.2) %>% 
+  filter(class=="discharge dependant") %>% select(-STATION_NAME, -dist.m, -dist_error) %>% 
+  group_by(obj_id) %>% nest() %>% ungroup() %>% mutate(count = map_dbl(data,nrow)) %>% filter(count==1) %>%  sample_n(1)%>%unnest(data) %>% unnest(data) %>% 
+  ggplot()+
+  geom_rect(aes(xmin=fin.min, xmax=fin.max, ymin=0, ymax=2))+
+  geom_point(aes(x=Value.0, y=.pred_class, color=ID))+facet_grid(vars(ID), vars(obj_id))
+demo.plot
+
+
+sill.sf = sill.compare %>% rename(OBJECTID=obj_id) %>% left_join(lakes.sf, by="OBJECTID") %>% 
+  st_as_sf() %>% st_transform(crs.plot)
+
+station.locations.sill = level.locations %>% 
+  filter(ID != "10MC002" &  ID != "10LC014" &
+           ID != "10LC021" & ID != "10MC008")
+
+
+sill.compare %>%select(class, fin.range) %>% 
+  group_by(class) %>% 
+  summarise(num.lt1m = sum(fin.range<=1, na.rm=T),
+         num.gt1m = sum(fin.range>1, na.rm=T),
+         count = n())
+
+
+p1=ggplot()+
+  geom_sf(data=sill.sf %>% filter(fin.range<1 & !is.na(fin.sill)),
+          aes(fill=fin.sill), color=NA)+
+  scale_fill_viridis_c(option="inferno")+
+  theme_void()+
+  annotation_scale()+
+  geom_sf(data=mack.basin.large, color="grey70", size=0.5)+
+  geom_sf(data=station.locations.sill, color="black",size=2)+
+  theme(
+        panel.background = element_rect(fill="grey90",color=NA),
+        legend.position="bottom",
+        legend.text = element_text(size=12, angle=45, hjust=1),
+        legend.background = element_blank(),
+        legend.title = element_text(size=12, face="bold"))+
+  labs(fill="average\nfunctional\nsill elevation\n(m)")+
+   guides(fill = guide_colorbar(barwidth = 8, barheight = 0.5))
+p1
+p1.all=ggplot()+
+  geom_sf(data=sill.sf %>% filter(!is.na(fin.sill)),
+          aes(fill=fin.sill), color=NA)+
+  scale_fill_viridis_c(option="inferno", limits = c(-0.25, 4))+
+  theme_void()+
+  annotation_scale()+
+  geom_sf(data=mack.basin.large, color="grey70", size=0.5)+
+ # geom_sf(data=station.locations.sill, color="black",size=2, shape=17)+
+  theme(
+        panel.background = element_rect(fill=NA, color=NA),
+        legend.position="bottom",
+        legend.text = element_text(size=12),
+        legend.background = element_blank(),
+        legend.title = element_text(size=12, face="bold"))+
+  labs(fill="average\nfunctional\nsill elevation\n(m)")+
+   guides(fill = guide_colorbar(barwidth = 8, barheight = 0.5))+ggtitle("a.")
+p1.all
+
+p2 = ggplot()+
+  geom_sf(data=sill.sf %>% filter(fin.range<1 & !is.na(fin.sill)),
+          aes(fill=fin.range), color=NA)+
+  scale_fill_viridis_c(option="viridis", limits = c(0,1))+
+  geom_sf(data=mack.basin.large, color="grey70", size=0.5)+
+  geom_sf(data=station.locations.sill, color="black",size=2)+
+  theme_void()+
+  theme(
+    panel.background = element_rect(fill=NA, color=NA), 
+    legend.background = element_blank(),
+    legend.position = "bottom",
+    legend.text = element_text(size=12, angle=45, hjust=1),
+    legend.title = element_text(size=12, face="bold"))+
+  labs(fill="width of uncert-\nainty bounds\n(m)")+
+   guides(fill = guide_colorbar(barwidth = 8, barheight = 0.5))
+
+p2.all = ggplot()+
+  geom_sf(data=sill.sf %>% filter(!is.na(fin.sill)),
+          aes(fill=fin.range), color=NA)+
+  scale_fill_viridis_c(option="viridis", limits=c(0,6))+
+  geom_sf(data=mack.basin.large, color="grey70", size=0.5)+
+  #geom_sf(data=station.locations.sill, color="black",size=2, shape=17)+
+  theme_void()+
+  theme(
+    panel.background = element_rect(fill=NA, color=NA), 
+    legend.background = element_blank(),
+    legend.position = "bottom",
+    legend.text = element_text(size=12),
+    legend.title = element_text(size=12, face="bold"))+
+  labs(fill="width of sill elev-\nation range\n(m)")+
+   guides(fill = guide_colorbar(barwidth = 8, barheight = 0.5))+ggtitle("b.")
+p2.all
+p3=ggplot()+
+  geom_sf(data=sill.sf %>% filter(fin.range> 1 | is.na(fin.sill)) %>% 
+            mutate(class = ifelse(class=="discharge dependant", 
+                                  "high uncertainty\nwater level\ndependant", 
+                                  class)) %>% 
+            mutate(class = ifelse(class=="no discharge relationship", 
+                                  "no significant\nwater level\nrelationship", class)),
+          aes(fill=class), color=NA)+
+  #scale_fill_viridis_c(option="viridis", limits = c(0,1))+
+  geom_sf(data=mack.basin.large, color="grey70", size=0.5)+
+  geom_sf(data=station.locations.sill, color="black",size=2)+
+  theme_void()+
+  theme(
+    
+    legend.background = element_blank(),
+    
+    panel.background = element_rect(fill=NA, color=NA), 
+    legend.position = "bottom",
+    legend.text = element_text(size=12),
+    legend.title = element_blank())+
+   guides(fill=guide_legend(nrow=4,byrow=TRUE))
+
+p3.all=ggplot()+
+  geom_sf(data=sill.sf %>% filter(is.na(fin.sill)) %>% 
+            mutate(class = ifelse(class=="discharge dependant", 
+                                  "high uncertainty, can't calculate sill", 
+                                  class)) %>% 
+            mutate(class = ifelse(class=="no discharge relationship", 
+                                  "no significant\nwater level relationship", class)),
+          aes(fill=class), color=NA)+
+  #scale_fill_viridis_c(option="viridis", limits = c(0,1))+
+  geom_sf(data=mack.basin.large, color="grey70", size=0.5)+
+ # geom_sf(data=station.locations.sill, color="black",size=2, shape=17)+
+  theme_void()+
+  theme(
+   
+    legend.background = element_blank(),
+    
+    panel.background = element_rect(fill=NA, color=NA), 
+    legend.position = "bottom",
+    legend.text = element_text(size=12),
+    legend.title = element_blank())+
+   guides(fill=guide_legend(nrow=4,byrow=TRUE))+ggtitle("c.")
+
+
+
+p1+p2+p3
+setwd(images.wd)
+ggsave(paste0(todayDate,"_sills.png"), width=10.5, height=8.5, units = "in")
+
+p1.all+p2.all+p3.all
+setwd(images.wd)
+ggsave(paste0("20230423","_sills_ALL.png"), width=10.5, height=8.5, units = "in")
+
+# table with a summary of lakes
+sill.compare %>% lazy_dt() %>% 
+    mutate(final.class = case_when(
+    class=="always 0" ~ "always 0",
+    class=="always 2" ~ "always 2",
+    class=="discharge dependant" & (fin.range<=1) ~ 
+      "discharge dependant (<1m uncert)",
+    class=="discharge dependant" & (fin.range>1 & fin.range<=1.5) ~ 
+      "water level dependant (1-1.5m uncert)",
+    class=="discharge dependant" & (fin.range>1.5 & fin.range <=2) ~ 
+      "water level dependant (1.5-2m uncert)",
+    class=="discharge dependant" & (fin.range>2) ~ 
+      "water level dependant (>2m uncert)",
+    class=="discharge dependant" & (is.na(fin.range)) ~ 
+      "water level dependant (unable to calculate sill)",
+    class=="no discharge relationship" ~ "no discharge relationship"
+  )) %>% group_by(final.class) %>% count()
+
+```
+
+# Comparison of our sill elevations to Marsh & Hey 1988
+```{r}
+# Import the sill elevations calculated above
+setwd(int.wd)
+sill.compare = read_feather(paste0(todayDate, "sillElevation_c.feather"))
+
+# import the validation and join it to the same object ids as used above
+setwd(val.wd)
+val.raw = read_sf(val.filename) %>% st_transform(crs.plot)
+lakes.prj = lakes.sf %>% st_transform(crs.plot)
+
+
+combo.df = val.raw %>% st_join(lakes.prj %>% select(geometry, OBJECTID)) %>% 
+  filter(!is.na(OBJECTID)) %>% 
+  left_join(sill.compare %>% select(obj_id, fin.range, fin.sill, class) %>% 
+              rename(OBJECTID = obj_id), by="OBJECTID") %>% mutate(errorbar = fin.range/2) %>% 
+  mutate(marsh.sill = (SmmrSill+SpringSill)/2)
+
+combo.df %>% filter(fin.range<=1)%>%  ggplot(aes(x=fin.sill, y=marsh.sill))+
+  geom_errorbarh(aes(xmin = fin.sill-errorbar, xmax = fin.sill+errorbar, y=marsh.sill, height=0.1), alpha=0.5, color="grey50")+
+  geom_errorbar(aes(x=fin.sill, ymin=marsh.sill-0.5, ymax =marsh.sill +0.5, width=0.1), alpha=0.5, color="grey50")+
+  theme_bw()+
+  geom_abline(aes(slope=1, intercept=0))+geom_point()+
+  coord_fixed(ratio = 1, xlim = NULL, ylim = NULL, expand = TRUE, clip = "on")+
+  xlab("functional sill elev. (m)")+
+  ylab("Marsh & Hey 1988 Avg Spring & Summer Sill Elevation (m)")+xlim(0,5)+ylim(0,5)
+
+
+count.df = combo.df %>%  filter(is.na(fin.sill)) %>% group_by(class) %>% count()
+
+combo.df %>%  filter(is.na(fin.sill)) %>% ggplot(aes(x=class, y=marsh.sill, fill=class))+geom_boxplot()+
+  geom_text(data=count.df, aes(x=class, y=5.2, label=paste0("n=",n)))+theme_bw()+xlab("lakes w/ no functional sill elevation")+
+  ylab("Marsh & Hey 1988 Avg Spring & Summer Sill (m)")
+
+
+
+combo.df %>% as_tibble() %>% select(-geometry) %>% mutate(class=case_when(
+  is.na(fin.sill) ~ class,
+  !is.na(fin.sill) & fin.range <=1 ~ "low error (<= +/- 0.5m) functional sill",
+   !is.na(fin.sill) & fin.range >1 ~ "high error (> +/- 0.5m) functional sill"
+)) %>% group_by(class) %>% count()
+
+val.raw %>% st_join(lakes.prj %>% select(geometry, OBJECTID)) %>% 
+  filter(is.na(OBJECTID))
+
+
+combo.df %>% mutate(sill.diff = marsh.sill-fin.sill) %>% filter(!is.na(fin.sill)) %>% 
+  mapview(zcol="sill.diff", at=seq(-3,3, 1))
+```
+
+
+
+
+# Calculate connectivity durations
+```{r}
+# import sill elevation data
+setwd(int.wd)
+sill.compare = read_feather(paste0(todayDate, "sillElevation_c.feather")) %>% 
+  filter(!is.na(fin.sill)& fin.range < 1) %>% # keep only lakes that have a sill elevation with a range less than 1m
+  rename(OBJECTID=obj_id)
+
+# Select only water level data from years where we have mostly complete records (at least 113/153 days) at at least 5/6 stations
+keep.years = level_data %>% 
+  filter(ID != "10MC002" &  ID != "10LC014" &
+           ID != "10LC021" & ID != "10MC008") %>% 
+  filter(!is.na(Value)) %>% filter(month>=5) %>% 
+  group_by(ID, year) %>% count() %>% ungroup() %>% 
+  filter(n>113) %>% #153 is max days, only allow up to 20 missing days
+  group_by(year) %>% count() %>% filter(n>=5) %>%  ungroup()
+
+# select years for each station
+keep.station.years = level_data %>% 
+  filter(ID != "10MC002" &  ID != "10LC014" &
+          ID != "10LC021" & ID != "10MC008") %>% 
+  filter(!is.na(Value)) %>% filter(month>=5) %>% 
+  group_by(ID, year) %>% count() %>% ungroup() %>% 
+  filter(n>113 & year %in% keep.years$year)
+
+# for those selected years, calculate the average water level at each station
+mean.level = level_data %>% 
+  filter(ID != "10MC002" &  ID != "10LC014" &
+           ID != "10LC021" & ID != "10MC008") %>% 
+  left_join(keep.station.years, by=c("ID", "year")) %>% 
+  filter(month>=5) %>% 
+  filter(!is.na(n)) %>% 
+  group_by(ID,doy) %>% 
+  summarise(mean.level = mean(Value, na.rm=T)) %>% as.data.table()
+
+N <- nrow(sill.compare)
+above.min <- vector("list", N)
+above.mid = vector("list", N)
+above.max = vector("list", N)
+
+for (z in 1:nrow(sill.compare)){
+  df = sill.compare[z,]
+  stations = df %>% select(starts_with("STATION"))
+  stations = as.data.frame(t(stations))$V1 
+  fin.min = df$fin.min[1]
+  fin.max = df$fin.max[1]
+  fin.sill = df$fin.sill[1]
+  
+  level_df = mean.level[ID %in% stations]
+  level_df = dcast(level_df, doy~ID, value.var="mean.level")
+  level_df = na.omit(level_df)
+   
+  relevant.level.mean = level_df[, .(Mean = rowMeans(.SD)), by = doy]
+   
+  above.min.num = relevant.level.mean[Mean>=fin.min, .N]
+  above.mid.num = relevant.level.mean[Mean>=fin.sill, .N]
+  above.max.num = relevant.level.mean[Mean>=fin.max, .N]
+  
+  above.min[[z]] = above.min.num
+  above.mid[[z]] = above.mid.num
+  above.max[[z]] = above.max.num
+}
+above.min = above.min %>% unlist()
+above.mid = above.mid %>% unlist()
+above.max = above.max %>% unlist()
+OBJECTID = sill.compare$OBJECTID
+range = sill.compare$fin.range
+sill.days = cbind.data.frame(OBJECTID, range, above.min, 
+                             above.mid, above.max) %>% as_tibble()
+
+setwd(int.wd)
+write_feather(sill.days, paste0(todayDate, "avgConnectionTime.feather"))
+sill.days=read_feather(paste0(todayDate, "avgConnectionTime.feather"))
+
+
+scale_params <- tibble::tibble(
+  Key = factor("Highest Sill", levels = c("Highest Sill","Median Sill", "Lowest Sill"))
+)
+
+duration.prep= sill.days %>%  filter(range<1) %>% 
+  gather(Key, Value,-OBJECTID, -range) %>% 
+  left_join(lakes.sf, by="OBJECTID") %>% st_as_sf() %>% 
+  st_transform(crs.plot) %>% 
+  mutate(Key = case_when(
+    Key=="above.min"~ "Lowest Sill",
+    Key=="above.mid"~ "Median Sill",
+    Key=="above.max"~ "Highest Sill"
+  ))
+
+duration.prep$Key = factor(duration.prep$Key, levels=c("Highest Sill", 
+               "Median Sill",
+               "Lowest Sill"))
+
+duration.prep %>%   ggplot()+
+    geom_sf(data=mack.basin.large, color="grey70")+
+    #geom_sf(data=station.locations.sill, color="black", size=2)+
+    geom_sf(aes(fill=Value), color=NA)+
+    annotation_scale(text_cex = 0.9,
+                     data=scale_params)+
+    facet_wrap(~Key, nrow=1)+
+    scale_fill_gradient(low = "#fad1cd", high = "#bf3422",
+                        breaks = c(0,25, 50, 75, 100, 125, 150),
+                       limits=c(0,150),
+                       labels=c("0","25", "50","75" ,"100", "125",
+                                ">150") ,oob=squish)+
+    scale_x_continuous(expand = c(0, 0)) +
+    scale_y_continuous(expand = c(0, 0)) +
+    theme_void()+
+    theme(#axis.text.x = 
+         # element_text(hjust=1, angle=45, size=12),
+       # axis.text.y = element_text(size=12),
+      #  panel.background = element_rect(fill=NA, color=NA),
+        #panel.grid=element_blank(),
+        strip.text = 
+          element_text(color="black", face="bold", size=12),
+        legend.title = element_text(size=12, face="bold"),
+        legend.text = element_text(size=12),
+        strip.background = element_rect(fill=NA, color=NA),
+        panel.spacing = unit(0,'lines'),
+        legend.position="bottom")+
+    labs(fill=
+         "Average days\nfunctionally connected\nper summer\n(May-Sept.)")+
+   guides(fill = guide_colorbar(barwidth = 15, barheight = 1))
+  
+
+setwd(images.wd)
+ggsave(paste0("20230423", "avgConnectionTime.png"),
+       width = 10.5, height = 7.5, units="in")
+
+setwd(int.wd)
+read_feather(paste0(todayDate, "avgConnectionTime.feather")) %>% 
+  mutate(group.mid = case_when(
+    above.mid <=14 ~ "0-14 days",
+    above.mid>=15 & above.mid <=60 ~ "15-60 days",
+    above.mid>=61 ~ "above 61 days"
+  )) %>% group_by(group.mid) %>% count()
+
+read_feather(paste0(todayDate, "avgConnectionTime.feather")) %>% 
+  mutate(group.max = case_when(
+    above.max <=14 ~ "0-14 days",
+    above.max>=15 & above.max <=60 ~ "15-60 days",
+    above.max>=61 ~ "above 61 days"
+  )) %>% group_by(group.max) %>% count()
+
+
+read_feather(paste0(todayDate, "avgConnectionTime.feather")) %>% 
+  mutate(group.min = case_when(
+    above.min <=14 ~ "0-14 days",
+    above.min>=15 & above.min <=60 ~ "15-60 days",
+    above.min>=61 ~ "above 61 days"
+  )) %>% group_by(group.min) %>% count()
+
+```
+
+
+
+# Discharge trends enterng the delta and related connectivity trends
+```{r}
+complete.flows = hy_daily_flows(
+  station_number=c("10LC014", "10MC002", "10LC002"),
+  start_date = "1984-01-01") %>% 
+  mutate(doy = yday(Date),
+         month = month(Date),
+         year = year(Date))
+
+summary.flows = complete.flows %>%  
+  filter(doy<=212 & !is.na(Value)) %>% # end of July
+  group_by(STATION_NUMBER, year) %>% 
+  summarise(max.doy = doy[which.max(Value)],
+         max.value = Value[which.max(Value)],
+         count=n()) %>% 
+  ungroup() %>% gather(Key, Value, -STATION_NUMBER, -year) %>% 
+  mutate(STATION_NAME = case_when(
+    STATION_NUMBER == "10LC014" ~ "Mack River @ Arctic Red River",
+    STATION_NUMBER == "10LC002" ~ "Mack River East Channel @ Inuvik",
+    STATION_NUMBER =="10MC002" ~ "Peel River @ Fort McPhearson"
+  ))
+
+
+summary.flows %>% filter(Key=="max.doy") %>% ggplot(aes(x=year, y=Value))+
+  geom_line()+geom_point()+
+  facet_wrap(~STATION_NAME,nrow=3)+
+  scale_y_continuous(
+    breaks =c(121, 152, 182), labels =c("May 1", "June 1", "July 1"))+
+  scale_x_continuous(breaks=c(1985, 1990, 1995, 2000, 2005, 2010, 2015, 2020))+
+  ylab("DOY of peak discharge")
+
+summary.flows %>% filter(Key=="max.value") %>% ggplot(aes(x=year, y=Value))+
+  geom_line()+geom_point()+
+  facet_wrap(~STATION_NAME,scales="free_y", nrow=3)+
+  scale_x_continuous(breaks=c(1985, 1990, 1995, 2000, 2005, 2010, 2015, 2020))+
+  ylab("discharge [cms]")
+
+
+
+
+summary.flows %>% filter(Key=="max.doy")
+
+
+
+
+
+
+good.years = complete.flows %>% filter(STATION_NUMBER=="10LC014") %>% 
+  filter(!is.na(Value)) %>% 
+  group_by(year) %>% count() %>% filter(n>=365)
+
+complete.flows %>% filter(STATION_NUMBER=="10LC014") %>% 
+  filter(year %in% good.years$year & month>=8 & month<=10) %>% 
+  group_by(year) %>% 
+  summarise(dis.volume = sum(Value)) %>% 
+  ggplot(aes(x=year, y=dis.volume))+geom_line()+geom_point()
+
+# uses https://agupubs-onlinelibrary-wiley-com.libproxy.lib.unc.edu/doi/full/10.1002/2012WR013198 to define freshet initiation
+freshet.initiation = complete.flows %>% filter(STATION_NUMBER=="10LC014") %>% arrange(Date) %>% 
+  mutate(lag.value = lag(Value, n=1),
+         diff = Value-lag.value,
+         three.pct = Value*0.03,
+         thresh.tf = diff>=three.pct) %>% 
+  filter(thresh.tf==T & doy>31) %>% 
+  group_by(year) %>%
+  mutate(rnum= row_number()) %>% filter(rnum==1) %>% ungroup() %>% select(year, doy) %>% 
+  rename(freshet.in = doy)
+
+complete.flows %>% filter(STATION_NUMBER=="10LC014") %>% 
+  ggplot()+geom_line(aes(x=doy, y=Value))+
+  geom_vline(data=freshet.initiation, aes(xintercept = freshet.in))+facet_wrap(~year)
+
+
+first.peak = complete.flows %>% filter(STATION_NUMBER=="10LC014") %>% 
+  arrange(Date) %>% 
+  left_join(freshet.initiation %>% select(year, freshet.in), by="year") %>% 
+  filter(doy>freshet.in) %>% 
+  mutate(lag.value = lag(Value, n=1),
+         diff = Value-lag.value,
+         three.pct = Value*0.03,
+         thresh.tf = diff<= (-three.pct)) %>% 
+  filter(diff<0 & Value>=10000) %>% 
+  group_by(year) %>% 
+  mutate(rnum= row_number()) %>% filter(rnum==1) %>% ungroup() %>% select(year, doy, Value) %>% 
+  rename(first.peak = doy, peak.value=Value)
+  
+
+ggplot(data=complete.flows %>% filter(STATION_NUMBER=="10LC014"))+
+  geom_line(aes(x=doy, y=Value, group=year))+
+ # geom_vline(data = summary.flows %>% 
+          #     filter(Key=="max.doy" &STATION_NUMBER=="10LC014"),
+          #   aes(xintercept=Value), color="red", lty=5)+
+  #geom_vline(data=freshet.initiation, aes(xintercept=freshet.in), color="blue", lty=2)+
+  geom_vline(data=first.peak, aes(xintercept=first.peak), color="darkgreen", lty=8)+
+  facet_wrap(~STATION_NUMBER, scales="free_y", nrow=3)+facet_wrap(~year)
+
+filt.obs = all.classified.filter %>% 
+  left_join(first.peak, by= "year") %>% filter(!is.na(first.peak)) %>% 
+  filter(doy>=first.peak & doy<=first.peak+28) %>% 
+ # filter(month>=8) %>% 
+  group_by(year, OBJECTID) %>% 
+  summarise(mean.con = mean(as.numeric(as.character(.pred_class)))) %>% 
+  ungroup() %>% mutate(yeargroup = case_when(
+    year>=1984 & year<=2001 ~ "1984-2001",
+    year>=2002 & year<=2019 ~ "2002-2019"
+  ))
+
+# group by time period, count number of years of data each lake has in each month in each period
+good.ids = filt.obs %>% group_by(OBJECTID,yeargroup) %>%count() %>% ungroup() %>% 
+  filter(n>=10) 
+# select only lakes that have at least 10 obs in all periods
+best.ids = good.ids %>% group_by(OBJECTID) %>% count() %>% ungroup() %>% filter(n==2)
+
+
+filt.obs.final = filt.obs %>% filter(OBJECTID %in% best.ids$OBJECTID) %>% 
+  group_by(OBJECTID) %>% nest()
+final.combo = NULL
+for (j in 1:nrow(filt.obs.final)){
+  print(j)
+  df = filt.obs.final$data[[j]]
+  OBJECTID = filt.obs.final$OBJECTID[[j]]
+  p1.df = df %>% filter(yeargroup == "1984-2001")
+  p2.df = df %>% filter(yeargroup == "2002-2019")
+  all.df = df
+  # calculate mann kendall
+  p1.obj=MannKendall(p1.df$mean.con)
+  p2.obj=MannKendall(p2.df$mean.con)
+  all.obj=MannKendall(all.df$mean.con)
+  
+  p1.tau = p1.obj$tau
+  p2.tau = p2.obj$tau
+  all.tau = all.obj$tau
+  
+  p1.pval = p1.obj$sl
+  p2.pval = p2.obj$sl
+  all.pval = all.obj$sl
+  
+  p1.combo = cbind.data.frame(OBJECTID, tau = p1.tau, pval=p1.pval, yeargroup="1984-2001")
+  p2.combo = cbind.data.frame(OBJECTID, tau=p2.tau, pval=p2.pval, yeargroup="2002-2019")
+  all.combo = cbind.data.frame(OBJECTID, tau=all.tau, pval=all.pval, yeargroup="all")
+  
+  final.combo=rbind.data.frame(final.combo, p1.combo, p2.combo, all.combo)
+}
+
+final.combo %>% 
+  as_tibble() %>% 
+  mutate(significance = ifelse(pval<0.05, T, F),
+         dir = case_when(
+           tau<0 ~ "negative",
+           tau>0 ~ "positive",
+           tau==0 ~ "0"
+         )) %>% 
+  group_by(yeargroup, significance, dir) %>% 
+  count()
+
+
+final.combo %>% as_tibble() %>% 
+  left_join(lakes.sf, by="OBJECTID") %>% st_as_sf() %>% st_transform(crs.plot) %>% 
+  ggplot()+
+  geom_sf(data=mack.basin.large, color="grey75", size=0.01)+
+  geom_sf(aes(fill=tau), color=NA)+
+   scale_fill_gradientn(
+   colors=c("blue","grey85","red"),
+   values=scales::rescale(c(-1,0,1)),
+   limits=c(-1,1)
+  )+
+  theme_bw()+
+  #annotation_scale(text_cex = 0.9)+
+  theme(axis.text.x = element_text(angle=45, hjust=1, size=12),
+        strip.text = element_text(size=14, face="bold"),
+        title = element_text(size=14, face="bold"),
+        axis.text.y = element_text(size=12),
+        legend.title = element_text(size=12),
+        legend.text=element_text(size=10),
+        legend.position = "bottom",
+        legend.justification = "center")+labs(fill="Trend")+
+  #guides(fill=guide_legend(nrow=1, legend.justification="center"))+
+  facet_wrap(~yeargroup)+labs(fill="Kendall's Tau")+
+  ggtitle("All lakes")
+
+final.combo %>% as_tibble() %>% filter(pval<0.05) %>% 
+  left_join(lakes.sf, by="OBJECTID") %>% st_as_sf() %>% st_transform(crs.plot) %>% 
+  ggplot()+
+  geom_sf(data=mack.basin.large, color="grey75", size=0.01)+
+  geom_sf(aes(fill=tau), color=NA)+
+   scale_fill_gradientn(
+   colors=c("blue","grey85","red"),
+   values=scales::rescale(c(-1,0,1)),
+   limits=c(-1,1)
+  )+
+  theme_bw()+
+  #annotation_scale(text_cex = 0.9)+
+  theme(axis.text.x = element_text(angle=45, hjust=1, size=12),
+        strip.text = element_text(size=14, face="bold"),
+        title = element_text(size=14, face="bold"),
+        axis.text.y = element_text(size=12),
+        legend.title = element_text(size=12),
+        legend.text=element_text(size=10),
+        legend.position = "bottom",
+        legend.justification = "center")+labs(fill="Trend")+
+  #guides(fill=guide_legend(nrow=1, legend.justification="center"))+
+  facet_wrap(~yeargroup)+labs(fill="Kendall's Tau")+
+  ggtitle("Statistically significant trends")
+
+
+```
+
+# Plot gif of results w/ discharge
+# Plot gif
+```{r}
+setwd("C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/images/GIF_20230512")
+prep.gif.data = filt.obs %>%  # all lakes during 4 weeks after freshet
+  left_join(lakes.sf, by="OBJECTID") %>% 
+  st_as_sf() %>% st_transform(crs = crs.plot) %>% 
+  group_by(year) %>% nest() %>% ungroup()
+
+dis.location = hy_stations(station_number = "10LC014") %>% 
+  st_as_sf(coords=c("LONGITUDE", "LATITUDE")) %>% 
+  st_set_crs(4326) %>% st_transform(crs.plot)
+dis.filt = complete.flows %>% filter(STATION_NUMBER=="10LC014")
+
+study.area.gif=cbind.data.frame(lon=c(-137.3, -137.3, -133.2, -133.2), 
+                 lat=c(67.25, 69.64, 69.64, 67.25)) %>% 
+  st_as_sf(coords=c("lon", "lat")) %>% st_set_crs(4326) %>% st_bbox() %>% st_as_sfc() %>% 
+  st_transform(crs = crs.plot)
+
+### Loop through each year
+for (z in 1: length(prep.gif.data$year)){
+  dat = prep.gif.data$data[[z]] 
+  year.main = prep.gif.data$year[[z]]
+  
+  #### Create plot 1 (map of June connectivity)
+  scale = scale_fill_gradientn(colours = c("#88ccee","#44aa99","#117733"), limits=c(0,2))
+  p1 = ggplot(data=dat)+
+   geom_sf(aes(fill=mean.con), color=NA)+
+    theme_bw()+scale+
+    annotation_scale(text_cex = 1.2)+
+    geom_sf(data=mack.basin.large, color="grey65")+
+    geom_sf(data=study.area.gif , color=NA, fill=NA)+
+    #geom_sf(data=dis.location,color="black", size=5)+
+    scale_colour_manual(guide="none", values=c("#000000", "#ABA9A9"))+
+    ggtitle(year.main)+
+    theme(axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          plot.title=element_text(size=18, face="bold", hjust=0.5),
+         # legend.title = element_text(size=16, face="bold"),
+          legend.text=element_text(size=16, face="bold"),
+          legend.position="bottom", legend.direction="horizontal",
+          legend.key.size=unit(1, "cm"),
+          axis.ticks = element_blank(),
+          legend.title=element_blank(),
+         legend.box.spacing = unit(0, "pt"),
+         legend.margin=margin(0,0,0,0))+labs(fill="Class")+
+    guides(fill=guide_legend(label.position="top",label.vjust = -8, title.vjust = 0.2))
+  
+
+  #### Save the gif to your file
+  ggsave(plot=p1,filename= paste0("year", year.main, ".png") ,width=14, height=9.5, units = "in") 
+}  
+
+
+### List all the files in the gif and combine them into a stacked image
+
+files=list.files(pattern="*.png")
+images <- map(files, image_read)
+images <- image_join(images)
+### Animate the stacked image
+gif = image_animate(images, fps = 1, dispose = "previous")
+
+## save as a gif
+setwd(images.wd)
+
+image_write(gif, paste0("gif_", "20230512", ".gif"))
+
+
+```
+
+# Water Level trends
+```{r}
+level_data %>% 
+  filter(ID != "10MC002" &  ID != "10LC014" &
+           ID != "10LC021" & ID != "10MC008") %>% 
+  ggplot()+geom_line(aes(x=doy, y=Value, group=ID, color=ID))+
+  facet_wrap(~year)
+
+# 10LC002 good years
+good.10LC002 =c(1984, 1985, 1986, 1987, 1988, 1989, 1990, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017)
+good.10LC012 = c(1991, 2010, 2016, 2017)
+good.10LC013 = c(1998, 2010, 2011, 2012, 2013, 2015, 2016)
+good.10MC003 = c(1984, 1985, 1992, 1993, 1997, 2001, 2002, 2003, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2019)
+good.10MC023 = c(2001, 2002, 2005, 2006, 2009, 2010, 2011, 2012, 2014, 2015, 2016, 2017)
+good.10MC011 = c(1987, 2002, 2008, 2009, 2010, 2012, 2013, 2014, 2015)
+
+
+max.values = level_data %>% 
+  filter((ID=="10LC002" & year %in% good.10LC002) |
+           (ID=="10LC012" & year %in% good.10LC012)|
+           (ID == "10LC013" & year %in% good.10LC012)|
+           (ID =="10MC003" & year %in% good.10MC003)|
+           (ID =="10MC023" & year %in% good.10MC023)|
+           ID=="10MC011" & year %in% good.10MC011) %>% 
+  filter(doy<=196 & !is.na(Value)) %>% # July 15
+  group_by(ID, year) %>% 
+  summarise(max.doy = doy[which.max(Value)],
+         max.value = Value[which.max(Value)]) %>% 
+  ungroup() %>% gather(Key, Value, -ID, -year) %>% 
+  filter(ID!="10LC012") %>% filter(ID!="10LC013")
+
+ggplot(data=max.values, aes(x=year, y=Value, group=ID, color=as.factor(ID)))+geom_line()+geom_point()+
+  facet_wrap(~Key, nrow=2, scales="free_y")
+
+whole.period.signif = max.values %>% arrange(ID, year) %>% 
+  group_by(ID, Key) %>% 
+  do(pval = base::summary(lm(Value ~ year, data=.))$coefficients[2,4]) %>% unnest(cols="pval")
+
+
+early.period.signif = max.values %>% arrange(ID, year) %>% dplyr::filter(year<=1999) %>% 
+  group_by(ID, Key) %>% 
+  do(pval = base::summary(lm(Value ~ year, data=.))$coefficients[2,4]) %>% unnest(cols="pval")
+
+late.period.signif = max.values %>% arrange(ID, year) %>% dplyr::filter(year>1999) %>% 
+  group_by(ID, Key) %>% 
+  do(pval = base::summary(lm(Value ~ year, data=.))$coefficients[2,4]) %>% unnest(cols="pval")
+
+cols= c(`10LC002` = "lightblue", `10LC012` = "skyblue3", `10LC013` = "midnightblue", 
+`10MC003` = "lightgreen", `10MC011` = "springgreen3", `10MC023` = "darkgreen"
+)
+
+# high flows
+whole.period = ggplot(data = max.values, 
+       aes(x=year, y=Value, group=ID, color=ID))+
+  geom_line()+geom_point()+
+  geom_smooth(data = max.values %>% 
+                        left_join(whole.period.signif, by=c("ID", "Key")) %>% 
+                filter(pval<=0.05),
+    method="lm", se=F)+
+  facet_wrap(~Key, scales="free_y", strip.position="right",
+             labeller = as_labeller(c(max.doy = "day of year\nwith maximum\nwater level", 
+                                      max.value = "maximum water\nlevel (m)") ))+
+  xlim(1983, 2018)+
+  scale_color_manual(values=cols)+theme_bw()+xlab(NULL)+ylab(NULL)
+
+early.period = ggplot(data = max.values %>% filter(year<=1999), 
+       aes(x=year, y=Value, group=ID, color=ID))+
+  geom_line()+geom_point()+
+  geom_smooth(data = max.values %>% filter(year<=1999) %>% 
+                        left_join(early.period.signif, by=c("ID", "Key")) %>% 
+                filter(pval<=0.05),
+    method="lm", se=F)+
+  facet_wrap(~Key, scales="free_y", strip.position="right",
+             labeller = as_labeller(c(max.doy = "day of year\nwith maximum\nwater level", 
+                                      max.value = "maximum water\nlevel (m)") ))+
+  xlim(1983, 2018)+
+  scale_color_manual(values=cols)+theme_bw()+xlab(NULL)+ylab(NULL)
+
+late.period = ggplot(data = max.values %>% filter(year>1999), 
+       aes(x=year, y=Value, group=ID, color=ID))+
+  geom_line()+geom_point()+
+  geom_smooth(data = max.values %>% filter(year>1999) %>% 
+                        left_join(late.period.signif, 
+                                  by=c("ID", "Key")) %>% 
+                filter(pval<=0.05),
+    method="lm", se=F)+
+  facet_wrap(~Key, scales="free_y", strip.position="right",
+             labeller = as_labeller(c(max.doy = "day of year\nwith maximum\nwater level", 
+                                      max.value = "maximum water\nlevel (m)") ))+
+  xlim(1983, 2018)+
+  scale_color_manual(values=cols)+theme_bw()+ylab(NULL)
+
+whole.period/early.period/late.period + plot_layout(guides = "collect")
+
+
+```
+
+
+# Compare sediment to water level -- what is the relationship?
+```{r}
+# impart Mackenzie Sediment / Water Quality data from Arctic Red River
+setwd("C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data")
+
+wq.df = read.csv("ArcticGROWaterQuality.csv") %>% 
+  as_tibble() %>% select(Date, Discharge, DOC, TSS) %>% 
+  mutate(Date = as_date(Date))
+
+# Filter water level data just to Arctic Red River
+rr.water.level = level_data %>% filter(ID == "10LC014") %>% 
+  mutate(Date = as_date(Date))
+
+# join discharge and water quality data
+wl.wq = wq.df %>% left_join(rr.water.level, by="Date") %>% 
+  filter(!is.na(TSS) & !is.na(Value))
+
+ggplot(wl.wq)+
+  geom_point(aes(x=Value, y=TSS, color=as.factor(month)))+
+  xlab("Water Level (m) at Arctic Red River")+ylab("TSS (mg/L) at Arctic Red River")+theme_classic()+labs(color="Month")+
+  theme(axis.text = element_text(size=14),
+        axis.title = element_text(size=14, face="bold"),
+        legend.text = element_text(size=14),
+        legend.title = element_text(size=14, face="bold"),
+        panel.background = element_rect(fill='transparent'),
+        #transparent panel bg
+    plot.background = element_rect(fill='transparent', color=NA),
+    #transparent plot bg
+    panel.grid.major = element_blank(), #remove major gridlines
+    panel.grid.minor = element_blank(), #remove minor gridlines
+    legend.background = element_rect(fill='transparent'), 
+    #transparent legend bg
+    legend.box.background = element_rect(fill='transparent', color=NA)) 
+#transparent legend panel)
+setwd(images.wd)
+ggsave("20230508_TSS_vs_waterLevel.png", bg="transparent",
+       width = 6, height = 4, units="in")
+# TLDR: Above the delta, water level and TSS are highly correlated. 
+```
+
+# Investigate connectivity and storm surge
+```{r}
+library(weathercan)
+# According to Environment Canada, Modified Date: 2023-01-24 23:30 UTC                                                                                                 
+# Environment Canada Disclaimers:
+# "Station Inventory Disclaimer: Please note that this inventory list is a snapshot of stations on our website as of the modified date, and may be subject to change without notice."
+# "Station ID Disclaimer: Station IDs are an internal index numbering system and may be subject to change without notice."
+
+# wind direction includes NW and NNW - http://snowfence.umn.edu/Components/winddirectionanddegrees.htm
+# stations: 53582,1700
+tuk <- weather_dl(station_ids = c(53582, 1700), start = "1984-01-01", end = "2022-12-31")
+setwd(int.wd)
+write_feather(tuk, "tuk_download_1984_2022.feather")
+tuk=read_feather("tuk_download_1984_2022.feather")
+tuk %>% ggplot()+geom_density(aes(x=wind_dir*10))
+
+tuk_daily = tuk %>% filter(!is.na(wind_dir) & !is.na(wind_spd)) %>% 
+  mutate(wind_dir_deg = wind_dir*10,
+               wind_dir_rad = wind_dir_deg * (pi / 180),
+               x= sin(wind_dir_rad), # sin and cos are swapped here from normal vector analysis, because directional degrees go clockwise, and math degrees go counterclockwise
+               y= cos(wind_dir_rad)) %>% 
+  group_by(date) %>% 
+  summarise(x_mean = mean(x, na.rm=T),
+            y_mean = mean(y, na.rm=T),
+            wind_spd_75 = quantile(wind_spd, probs=0.75, na.rm=T),
+            count = n()) %>% 
+  mutate(wind_dir_rad = raster::atan2(y_mean,x_mean)+pi,
+         wind_dir_deg = wind_dir_rad *(180/pi)) %>% 
+  mutate(month=month(date), year=year(date), doy=yday(date))
+
+windy = tuk_daily %>% filter(wind_dir_deg>=281.25 & wind_dir_deg<=348.75 & month>=7 & month<=9)
+not_windy = tuk_daily %>% filter((wind_dir_deg<=281.25 | wind_dir_deg>=348.75) & month>=7 & month<=9)
+#WNW to NNW
+
+sb.level = level_data %>% filter((ID=="10MC003" | ID=="10MC002"| ID =="10LC014" | ID=="10MC023") & month>=7 & month <=9 )
+
+ggplot()+geom_line(data= sb.level, aes(x=doy, y=Value, group=ID, lty=ID))+
+  geom_point(data=windy, aes(x=doy, y=9, color=wind_spd_75), alpha=0.5)+
+  facet_wrap(~year)+scale_color_viridis_c()
+
+# comparing how other wind directions impact water level outside of WNW-NNW
+sb.level %>% rename(date=Date) %>% mutate(date = as_date(date)) %>% 
+  left_join(windy %>% select(date, wind_spd_75) %>% 
+              rename(NW_wind_spd=wind_spd_75), by="date") %>% 
+  left_join(not_windy %>% select(date, wind_spd_75) %>% 
+              rename(otherdir_wind_spd=wind_spd_75), by="date") %>% 
+  ggplot()+geom_point(aes(x=NW_wind_spd, y = Value, color="WNW-NNW"), alpha=0.08)+
+  geom_point(aes(x=otherdir_wind_spd, y = Value, color="other directions"), alpha=0.08)+
+  geom_smooth(aes(x=otherdir_wind_spd, y = Value, color="other directions"), method="lm")+
+  geom_smooth(aes(x=NW_wind_spd, y = Value, color="WNW-NNW"), method="lm")+
+  facet_wrap(~ID)+xlab("wind speed")+ylab("water level (m)")
+
+
+# Select storm events lasting 2 days or longer, get date ranges at least a week following each event, then pull connectivity classifications from those time ranges
+ big_events_2day = windy %>% filter(wind_spd_75>=30) %>% arrange(date) %>% 
+ # group_by(year) %>% 
+  mutate(ID = case_when (date == lead(date) - days(1) ~ 1, TRUE ~ 0)) %>% 
+  mutate(ID = case_when(date == lag(date) + days(1) ~ 1, TRUE ~ ID)) %>% 
+  filter(ID==1) %>% 
+    mutate(post_date = date + days(14)) 
+  
+ 
+pull.dates = Map(seq, from = big_events_2day$date, to = big_events_2day$post_date, by = "days") %>% unlist() %>% 
+  as_date() %>% unique()
+group.ids = cumsum(c(1, diff.Date(pull.dates)) >= 2)
+
+pull.dates = cbind.data.frame(pull.dates, group.ids) %>% 
+  mutate(date=pull.dates,
+         doy=yday(date),
+         year = year(date))
+
+group.info = 
+  pull.dates %>% as_tibble() %>% 
+  group_by(group.ids) %>% 
+  summarise(first = first(pull.dates),
+            last = last(pull.dates),
+            range = str_wrap(paste(first, "to", last), 10),
+            doy_first = yday(first),
+            doy_last = yday (last),
+            year = year(first))
+
+
+storm.event.classes = all.classified.filter %>% 
+  left_join(pull.dates %>% select(date, group.ids), by="date") %>% 
+  filter(!is.na(group.ids)) %>% 
+  mutate(.pred_class = as.numeric(as.character(.pred_class))) %>% 
+  group_by(group.ids,OBJECTID) %>% 
+  summarise(mean.class = mean(.pred_class)) %>% ungroup() %>% 
+  left_join(group.info %>% select(group.ids, range), by="group.ids")
+  
+average.classes= all.classified.filter %>% 
+  left_join(pull.dates %>% select(group.ids, doy), by="doy") %>% 
+  filter(!is.na(group.ids)) %>% 
+  mutate(.pred_class = as.numeric(as.character(.pred_class))) %>% 
+  group_by(group.ids,OBJECTID) %>% 
+  summarise(mean.class.timeAvg = mean(.pred_class),
+            count = n()) %>% ungroup() %>% filter(count>10)
+  
+diff.class = storm.event.classes %>% 
+  left_join(average.classes, by=c("group.ids", "OBJECTID")) %>% 
+  filter(!is.na(mean.class.timeAvg)) %>% 
+  mutate(diff_class = mean.class-mean.class.timeAvg) %>% 
+  left_join(lakes.sf, by="OBJECTID") %>% st_as_sf()
+ 
+good.ids = diff.class %>% as_tibble() %>% select(-geometry) %>% group_by(group.ids) %>% 
+  count() %>% filter(n>2000)
+
+ggplot(data=diff.class %>% 
+         filter(group.ids %in% good.ids$group.ids))+
+  geom_sf(aes(fill=diff_class), color=NA)+
+  facet_wrap(~str_wrap(range, 20), nrow=2)+
+  scale_fill_gradient2(
+    low = "grey20", 
+    mid = "darkslategray3", 
+    high = "red", 
+    midpoint = 0, limits =c(-2,2)
+  )+
+    theme(axis.text.x=element_text(angle=45, hjust=1))
+
+diff.class %>% as_tibble() %>% select(-geometry) %>% 
+  mutate(group=case_when(
+    diff_class <=-0.25 ~ "< -0.25",
+    diff_class>-0.25 & diff_class<=0.25 ~"-0.25-0.25",
+    diff_class >0.25 ~ ">0.25"
+  )) %>% 
+  group_by(group) %>% summarise(mean=mean(diff_class), count=n())
+
+# Idea - use sill elevation and water level to count how frequently it might get inundated
+
+
+
+
+```
+
+
+# Investigate water level and storm surge
+```{r}
+level_data %>% 
+  filter(doy>227&doy<273 & year==2015 & 
+           ID != "10MC002" &  ID != "10LC014" &
+           ID != "10LC021" & ID != "10MC008" &
+           ID != "10MC011") %>% 
+  left_join(level.locations, by="ID") %>% 
+  ggplot()+geom_line(aes(x=doy, y=Value, group=year))+
+  facet_wrap(~str_wrap(ID, 20),  scales="free_y")
+
+
+# 10LC002 first valley 238, first peak 240, second valley  242, peak 244
+wsc.10LC002= data.frame(
+  first.valley.doy = 238,
+  first.peak.doy = 240,
+  second.valley.doy = 242,
+  main.peak = 244,
+  approx.end.doy = 250,
+  ID = "10LC002"
+)
+wsc.10LC012= data.frame(
+  first.valley.doy = 238,
+  first.peak.doy = 240,
+  second.valley.doy = 242,
+  main.peak = 244,
+  approx.end.doy = 250,
+  ID="10LC012"
+)
+wsc.10LC013= data.frame(
+  first.valley.doy = 237,
+  first.peak.doy = 239,
+  second.valley.doy = 241,
+  main.peak = 244,
+  approx.end.doy = 247,
+  ID="10LC013"
+)
+wsc.10MC003= data.frame(
+  first.valley.doy = 238,
+  first.peak.doy = 240,
+  second.valley.doy = 242,
+  main.peak = 244,
+  approx.end.doy = NA,
+  ID="10MC003"
+)
+wsc.10MC023= data.frame(
+  first.valley.doy = 238,
+  first.peak.doy = 240,
+  second.valley.doy = 242,
+  main.peak = 244,
+  approx.end.doy = 250,
+  ID="10MC023"
+)
+
+event.2015 = rbind.data.frame(wsc.10LC002, wsc.10LC012, wsc.10LC013, 
+                              wsc.10MC003, wsc.10MC023) %>% 
+  mutate(year=2015) %>% 
+  left_join(level_data %>% select(doy, Value, ID, year) %>% rename(first.valley.doy=doy), 
+            by=c("SID", "first.valley.doy", "year")) %>% 
+  rename(min.value = Value)%>% 
+  left_join(level_data %>% select(doy, Value, ID, year) %>% rename(main.peak=doy), 
+            by=c("ID", "main.peak", "year")) %>% 
+  rename(peak.value = Value) %>% 
+  mutate(dif.level = peak.value-min.value,
+         dif.doy = approx.end.doy-first.valley.doy) %>% 
+  as_tibble()
+
+
+p1 = ggplot()+
+  geom_sf(data=mack.basin.large, color="grey60")+
+  geom_sf(data=event.2015 %>% 
+            left_join(level.locations, by="ID") %>% 
+            st_as_sf(), aes(color=dif.level), size=3)+
+  scale_color_viridis_c(option="magma")+theme_void()+
+  labs(color="difference\nwater level\n(m)")+
+  annotation_scale(text_cex = 0.9)+
+  theme(legend.text = element_text(size=12),
+        legend.title = element_text(size=12, face="bold"))
+
+p2= ggplot()+
+  geom_sf(data=mack.basin.large, color="grey60")+
+  geom_sf(data=event.2015 %>% 
+            left_join(level.locations, by="ID") %>% 
+            st_as_sf(), aes(color=first.valley.doy), size=3)+
+  scale_color_viridis_c(limits=c(235,255),option="plasma" )+theme_void()+
+  labs(color="Event start\nDOY")+
+  theme(legend.text = element_text(size=12),
+        legend.title = element_text(size=12, face="bold"))
+
+p3= ggplot()+
+  geom_sf(data=mack.basin.large, color="grey60")+
+  geom_sf(data=event.2015 %>% 
+            left_join(level.locations, by="ID") %>% 
+            st_as_sf(), aes(color=main.peak), size=3)+
+  scale_color_viridis_c(limits=c(235,255),option="plasma")+theme_void()+
+  labs(color="Event peak\nDOY")+
+  theme(legend.text = element_text(size=12),
+        legend.title = element_text(size=12, face="bold"))
+
+p4= ggplot()+
+  geom_sf(data=mack.basin.large, color="grey60")+
+  geom_sf(data=event.2015 %>% 
+            left_join(level.locations, by="ID") %>% 
+            st_as_sf(), aes(color=approx.end.doy), size=3)+
+  scale_color_viridis_c(limits=c(235, 255),option="plasma")+theme_void()+
+  labs(color="Approximate\nevent end\nDOY")+
+  theme(legend.text = element_text(size=12),
+        legend.title = element_text(size=12, face="bold"))
+
+event.summary.plot=ggarrange(p1, p2, p3, p4)
+
+
+avg.sept = all.classified.filter %>% 
+  mutate(.pred_class=as.numeric(as.character(.pred_class)))  %>% #convert classification from factor to numeric
+  group_by(OBJECTID, month) %>% 
+  summarise(mean.score=mean(.pred_class, na.rm=T),
+            med.score = median(.pred_class, na.rm=T),
+            sd.score = sd(.pred_class),
+            count= n() ) %>% dplyr::filter(count>=10) %>% ungroup() %>% 
+  as_tibble() %>% filter(month==9)
+
+
+wl.2015 = all.classified.filter %>% filter(year==2015 & month==9 & doy<=272) %>%
+  group_by(OBJECTID) %>% 
+  summarise(mean.con.2015.sept = 
+              mean(as.numeric(as.character(.pred_class)))) %>% 
+  ungroup() %>% 
+  left_join(avg.sept %>% select(OBJECTID, mean.score), by="OBJECTID") %>% 
+  na.omit() %>% 
+  mutate(diff = mean.con.2015.sept-mean.score) %>% 
+  left_join(lakes.sf, by="OBJECTID") %>% st_as_sf() %>% 
+  st_transform(crs.plot) 
+
+wl.2015 %>% as_tibble() %>% select(-geometry) %>% 
+  mutate(group= case_when(diff<=(-0.25) ~"lt 0",
+                          diff>=0.25 ~ "gt 0",
+                          diff>(-0.25) & diff<(0.25)  ~ "0")) %>% group_by(group) %>% count()
+
+event.connectivity.plot = ggplot(data=wl.2015)+
+  geom_sf(data=mack.basin.large, color="grey60")+
+    geom_sf(aes(fill=diff), color=NA)+
+  #  facet_wrap(~week, nrow=1)+
+  theme_void()+
+ # theme(axis.text.x = element_text(angle=45, hjust=1))+
+  scale_fill_gradient2(
+    low = "grey20", 
+    mid = "darkslategray3", 
+    high = "brown", 
+    midpoint = 0, limits =c(-2,2)
+  )+
+  labs(fill="Difference between\nSeptember 2015\nconnectivity and\nmean connectivity\n(1984-2022)")+
+  annotation_scale(text_cex = 0.9)+
+  theme(legend.text = element_text(size=12),
+        legend.title = element_text(size=12, face="bold"))
+  
+ggarrange(event.summary.plot, event.connectivity.plot)
+setwd(images.wd)
+ggsave(paste0(todayDate,"_2015septemberEvent.png"), width = 10, height=8, units="in")
+
+```
+
+
+
+
+
+
+# analyze trends in discharge over time
+```{r}
+
+  
+badYear_10MC003 = c(1987, 1988, 1989, 1990, 1991,1995, 1996, 1998, 
+                    1999, 2000,2004, 2005, 2016, 2017, 2019)
+badYear_10LC012 = c(1986, 1987, 1988, 1990, 1993,1994,  1995, 1996, 
+                    1997, 1998, 1999, 2000, 
+                    2002, 2004, 2005, 2006, 2007, 2008, 2009, 2011, 2012, 
+                    2013, 2019)
+badYear_10MC011 = c(1986, 1988, 1989, 1990, 1993, 1995, 1996,1998, 2000,
+                    2000, 2003, 2004, 2006, 2007, 2019)
+badYear_10LC013 = c(1986, 1987, 1988, 1989, 1993, 1995, 1996, 1997, 1998, 2000,
+                    2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010,
+                    2014, 2015, 2019)
+  
+test=flow.df.all.april %>% filter(
+  STATION_NUMBER %in% c("10MC003","10MC011")) %>% 
+  filter(!(STATION_NUMBER=="10MC003" & year %in% badYear_10MC003)) %>% 
+  filter(!(STATION_NUMBER=="10LC012" & year %in% badYear_10LC012)) %>% 
+  filter(!(STATION_NUMBER=="10MC011" & year %in% badYear_10MC011)) %>% 
+  filter(!(STATION_NUMBER=="10LC013" & year %in% badYear_10LC013))  %>% 
+  filter(year>=1984 & doy<212) %>% #remove anything after the end of July
+  group_by(STATION_NUMBER, year) %>% 
+  summarise(max.level = Value[which.max(Value)],
+            max.doy = doy[which.max(Value)])
+
+test %>% ggplot(aes(x=year, y=max.doy, color=STATION_NUMBER, group=STATION_NUMBER))+geom_line()+geom_point()+theme_bw()+
+  ylab("max level day of year")
+
+flow.df.all.april %>% filter(
+  STATION_NUMBER %in% c("10MC003", "10LC012", "10MC011", "10LC013")) %>% 
+  filter(!(STATION_NUMBER=="10MC003" & year %in% badYear_10MC003)) %>% 
+  filter(!(STATION_NUMBER=="10LC012" & year %in% badYear_10LC012)) %>% 
+  filter(!(STATION_NUMBER=="10MC011" & year %in% badYear_10MC011)) %>% 
+  filter(!(STATION_NUMBER=="10LC013" & year %in% badYear_10LC013))  %>% 
+  filter(year>=1984) %>% 
+  ggplot()+geom_line(aes(x=doy, y=Value, group=STATION_NUMBER, color=STATION_NUMBER))+
+  facet_wrap(~year)+geom_vline(data=test, aes(xintercept = max.doy, color= STATION_NUMBER))
+
+
+```
+
+#  Complete Functional Sill Elevation Calculation - raw classifications
+```{r}
+setwd(int.wd)
+all.classified.filter.raw = readRDS(paste0("final.class_raw_", todayDate, ".Rdata"))
+# Calculate mean water level at each WSC station
+flow.prep = flow.df.all %>% 
+   select(STATION_NUMBER, Date, Value) %>% 
+   spread(STATION_NUMBER, Value) %>% 
+   na.omit() %>% select(-Date) %>% colMeans() 
+# Get station numbers for all the stations
+col.names = flow.df.all %>% 
+   select(STATION_NUMBER, Date, Value) %>% 
+   spread(STATION_NUMBER, Value) %>% 
+   na.omit() %>% select(-Date) %>% colnames()
+
+# join the water level to the station location information
+flow.prep2 = cbind.data.frame(flow.prep %>% as_tibble(), col.names) %>% 
+  rename(STATION_NUMBER = col.names) %>% 
+  left_join(flow.location.df %>% 
+              select(STATION_NAME, STATION_NUMBER, geometry), 
+            by="STATION_NUMBER") %>% 
+  st_as_sf()
+
+# calculate a distance matrix between all stations
+dist.matrix = st_distance(flow.prep2)
+dimnames(dist.matrix) = list(col.names, col.names)
+dist.df = t(combn(colnames(dist.matrix), 2))
+dist.df = data.frame(dist.df, dist = dist.matrix[dist.df])
+
+# calculate a  difference matrix between mean water levels at each station
+dif.matrix = dist(flow.prep2$value, diag=T, upper=T) %>% as.matrix()
+dimnames(dif.matrix) = list(col.names, col.names)
+dif.df = t(combn(colnames(dif.matrix), 2))
+dif.df = data.frame(dif.df, dist = dif.matrix[dif.df]) %>% rename(dif = dist)
+
+# combine distance and difference matrices
+dist.dif.df = dist.df %>% left_join(dif.df, by=c("X1", "X2")) %>% as_tibble()
+
+# plot the relationship between distance between stations and differences in water level
+dist.dif.df %>% 
+  filter(X1 != "10MC002" &  X1 != "10LC014") %>% 
+  filter(X2 != "10MC002" &  X2 != "10LC014") %>% 
+  ggplot()+geom_point(aes(x=dist, y=dif, color=X1))+theme_classic()+
+  geom_smooth(aes(x=dist, y= dif), method="lm")+
+  xlab("distance (m) between station pairs")+ylab("difference in average\nwater level (m) between station pairs")+labs(color="WSC Station\nNumber")
+setwd(images.wd)
+ggsave(paste0(todayDate,"_levelDiff.png"), width = 6, height = 5, units = "in")
+
+# filter out the stations that are upstream of the delta, since they behave differently
+dist.dif.df.filt = dist.dif.df %>% 
+  filter(X1 != "10MC002" &  X1 != "10LC014") %>% 
+  filter(X2 != "10MC002" &  X2 != "10LC014")
+# Calculate the relationship between distance and difference in water level
+dist.dif.mod = lm(dif ~ as.numeric(dist), data =dist.dif.df.filt )
+mod.int = dist.dif.mod$coefficients[[1]]
+mod.slope = dist.dif.mod$coefficients[[2]]
+
+# For each station select lakes that are within 50km
+station.buffer = flow.location.df %>% st_buffer(50000) %>% # buffer by 50km
+  select(STATION_NUMBER, STATION_NAME, geometry) %>% 
+  filter(STATION_NUMBER != "10MC002" &  STATION_NUMBER != "10LC014") 
+
+lakes.proj = lakes.sf %>% st_transform(crs.plot) %>% 
+  select(OBJECTID, geometry)
+lake.list = st_intersects(lakes.proj, station.buffer)
+lakes.combo = lakes.proj[lengths(lake.list)>0,] %>% st_join(station.buffer) 
+
+
+# get distances between each lake and the relevant station
+lakes.point = lakes.combo %>% st_centroid()
+station.point = lakes.combo %>% as_tibble() %>% select(STATION_NUMBER) %>% 
+  left_join(flow.location.df, by="STATION_NUMBER") %>% 
+  st_as_sf() %>% select(STATION_NUMBER)
+
+lake.station.dist = st_distance(lakes.point, station.point, by_element=T) %>% as_tibble()
+
+lakes.station.dist = cbind.data.frame(lakes.combo, lake.station.dist) %>% 
+  as_tibble() %>% rename(dist.m = value) %>% 
+  mutate(dist_error = dist.m * mod.slope)
+
+# combine the lake classifications with the discharge data
+nest.sill.raw = all.classified.filter.raw %>% 
+  left_join(lakes.station.dist %>% as_tibble() %>% select(-geometry), by="OBJECTID") %>% 
+  filter(!is.na(STATION_NUMBER)) %>% 
+  mutate(.pred_class = as.numeric(as.character(.pred_class))) %>% 
+  filter(.pred_class !=1) %>% # remove the middle 'catch-all' class
+  left_join(flow.df.all %>% rename(date=Date, Value.0 = Value) %>% 
+              select(STATION_NUMBER, Value.0, date), by=c("date", "STATION_NUMBER"))%>% 
+  na.omit() %>% group_by(OBJECTID, STATION_NUMBER, 
+                         STATION_NAME,dist_error, dist.m) %>% 
+  nest() %>% ungroup()
+
+# loop through each objectid and station number pair to calculate initial sill elevations
+combo.all.raw = NULL
+for (y in 1:nrow(nest.sill.raw)){
+  df = nest.sill.raw$data[[y]]
+  obj_id = nest.sill.raw$OBJECTID[[y]]
+  stat_id = nest.sill.raw$STATION_NUMBER[[y]]
+  stat_nam = nest.sill.raw$STATION_NAME[[y]]
+  dist_error = nest.sill.raw$dist_error[[y]]
+  dist_m = nest.sill.raw$dist.m[[y]]
+  n.obs = nrow(df)
+  obs.count = df %>% group_by(.pred_class) %>% count() %>% ungroup() %>% 
+    mutate(all.obs = n.obs,
+           pct = n/n.obs)
+  if(isTRUE(obs.count$pct[obs.count$.pred_class==0]>=0.95) & nrow(df[df$.pred_class==0,])>=5  ){
+    class = "always 0"
+    combo = cbind.data.frame(obj_id, class, stat_id, stat_nam, dist_m, dist_error, 
+                           num.0=NA, mean.0=NA, sd.0=NA, min.0=NA, max.0=NA, 
+                           num.2=NA, mean.2 = NA, sd.2 =NA, min.2 = NA, max.2 = NA, 
+                           pval=NA)
+    combo.all.raw = rbind.data.frame(combo.all.raw, combo)
+    next
+  }
+  if(isTRUE(obs.count$pct[obs.count$.pred_class==2]>=0.95)& nrow(df[df$.pred_class==2,])>=5){
+    class = "always 2"
+    combo = cbind.data.frame(obj_id, class, stat_id, stat_nam, dist_m, dist_error, 
+                           num.0=NA, mean.0=NA, sd.0=NA, min.0=NA, max.0=NA, 
+                           num.2=NA, mean.2 = NA, sd.2 =NA, min.2 = NA, max.2 = NA, 
+                           pval=NA)
+    combo.all.raw = rbind.data.frame(combo.all.raw, combo)
+    next
+  }
+  if(isTRUE(nrow(df[df$.pred_class==2,])<5) | isTRUE(nrow(df[df$.pred_class==0,])<5)){
+    next
+  }
+  ttest = t.test(df[df$.pred_class == 0,]$Value.0, df[df$.pred_class == 2,]$Value.0 )
+  pval = ttest$p.value
+  if(pval>0.05){
+    class = "no discharge relationship"
+    combo = cbind.data.frame(obj_id, class, stat_id, stat_nam, dist_m, dist_error, 
+                           num.0=NA, mean.0=NA, sd.0=NA, min.0=NA, max.0=NA, 
+                           num.2=NA, mean.2 = NA, sd.2 =NA, min.2 = NA, max.2 = NA, 
+                           pval=NA)
+    combo.all.raw = rbind.data.frame(combo.all.raw, combo)
+    
+    next}
+  num.0 = df[df$.pred_class == 0,] %>% nrow()
+  num.2 = df[df$.pred_class == 2,] %>% nrow()
+  mean.0 = mean(df[df$.pred_class==0,]$Value.0)
+  sd.0 = sd(df[df$.pred_class==0,]$Value.0)
+  min.0 = min(df[df$.pred_class==0,]$Value.0)
+  max.0 = max(df[df$.pred_class==0,]$Value.0)
+  mean.2 = mean(df[df$.pred_class==2,]$Value.0)
+  sd.2 = sd(df[df$.pred_class==2,]$Value.0)
+  min.2 = min(df[df$.pred_class==2,]$Value.0)
+  max.2 = max(df[df$.pred_class==2,]$Value.0)
+  class = "discharge dependant"
+  combo = cbind.data.frame(obj_id, class, stat_id, stat_nam, dist_m, dist_error, 
+                           num.0, mean.0, sd.0, min.0, max.0, 
+                           num.2, mean.2, sd.2, min.2, max.2, 
+                           pval)
+  combo.all.raw = rbind.data.frame(combo.all.raw, combo)
+}
+setwd(int.wd)
+write_feather(combo.all.raw, paste0("raw_sillElevation_material_raw.feather"))
+combo.all.raw = read_feather("raw_sillElevation_material_raw.feather")
+
+# calculate ranges for sills. If two stations produced two different sill groups for a lake, take a peak at what is going on. Keep the class from the station that is closest to the lake
+diffclass.diffstat.raw = combo.all.raw %>%
+  group_by(obj_id, class) %>% count() %>% ungroup() %>% 
+  group_by(obj_id) %>% count() %>% ungroup()%>% 
+  rename(numclasses = n)
+keep.obs.raw = combo.all.raw %>% 
+  left_join(diffclass.diffstat.raw, by="obj_id") %>% as_tibble() %>% 
+  filter(numclasses>1) %>% arrange(obj_id, dist_m) %>% 
+  group_by(obj_id) %>% filter(row_number()==1) %>% 
+  select(obj_id, stat_id, numclasses) %>% rename(keepIDs = numclasses)
+combo.prep.raw = combo.all.raw %>% 
+  left_join(diffclass.diffstat.raw, by="obj_id") %>% 
+  left_join(keep.obs.raw, by=c("obj_id", "stat_id")) %>% as_tibble() %>% 
+  filter(numclasses == 1 | (numclasses >1 & !is.na(keepIDs)))
+  
+# calculate sill elevation ranges and the mid point of that range
+combo.update.raw = combo.prep.raw %>% 
+  mutate(xmin = case_when(
+                       max.0>min.2 ~ min.2-as.numeric(dist_error), 
+                       max.0<min.2 ~ max.0-as.numeric(dist_error)
+                     ),
+         xmax = case_when(
+           max.0>min.2 ~ max.0+as.numeric(dist_error),
+           max.0<min.2 ~ min.2 + as.numeric(dist_error)
+                    ),
+         mid.sill = (xmin+xmax)/2) %>% 
+  as_tibble()
+
+# for the lakes that are in 50km of multiple stations that all are able to calculate sill elevation ranges, compare the sill elevation ranges to see if they overlap
+compare.sills.raw = combo.update.raw%>% as_tibble() %>% 
+  filter(!is.na(mid.sill)) %>% group_by(obj_id) %>% count() %>% 
+  filter(n>1) %>% left_join(combo.update.raw  %>% filter(!is.na(mid.sill)), by="obj_id" ) %>% 
+  select(obj_id, n, stat_id, dist_m, mid.sill, xmin, xmax) %>% group_by(obj_id, n) %>% nest() 
+return_all.raw = NULL
+for (b in 1:nrow(compare.sills.raw)){
+  sill.df = compare.sills.raw$data[[b]] %>% arrange(dist_m) %>% as.data.table()
+  obj_id = compare.sills.raw$obj_id[[b]]
+  n = compare.sills.raw$n[[b]]
+  results = cbind.data.frame(obj_id, n, sill.df[, .(max(xmin), min(xmax))])
+  return_all.raw = rbind.data.frame(return_all.raw, results)
+}
+sill.compare.raw = combo.update.raw %>% 
+  left_join(return_all.raw, by="obj_id") %>% group_by(obj_id) %>% 
+  arrange(dist_m) %>% filter(row_number()==1) %>% 
+  ungroup() %>% 
+  mutate(diff = V2-V1,
+         fin.min = case_when(
+           !is.na(V1) & diff>0 ~ V1,
+           is.na(V1) ~ xmin,
+         ),
+         fin.max = case_when(
+           !is.na(V2) & diff>0 ~ V2,
+           is.na(V2) ~ xmax,
+         )) %>% select(obj_id, class,fin.min, fin.max) %>% 
+  mutate(fin.range = fin.max-fin.min,
+         fin.sill = (fin.max+fin.min)/2) %>% 
+  left_join(lakes.sf %>% rename(obj_id=OBJECTID) %>% 
+              select(obj_id, geometry),by=c("obj_id")) %>% st_as_sf() %>% 
+  st_transform(crs.plot)
+
+
+setwd(int.wd)
+write_feather(sill.compare.raw %>% as_tibble() %>% select(-geometry)
+                ,paste0(todayDate, "sillElevation_r.feather"))
+
+
+# table with a summary of lakes
+sill.compare.raw %>% as_tibble() %>% select(-geometry) %>% 
+  mutate(final.class = case_when(
+    class=="always 0" ~ "always 0",
+    class=="always 2" ~ "always 2",
+    class=="discharge dependant" & fin.range<1 ~ "discharge dependant (<1m uncert)",
+    class=="discharge dependant" & (fin.range>1 | is.na(fin.range)) ~ 
+      "discharge dependant (>1m uncert or unable to calculate sill)",
+    class=="no discharge relationship" ~ "no discharge relationship",
+  )) %>% group_by(final.class) %>% count() 
+
+```
+
+# compare sills from each version
+```{r}
+raw.compare = sill.compare.raw %>% as_tibble() %>% select(-geometry) %>% 
+  mutate(final.class = case_when(
+    class=="always 0" ~ "always 0",
+    class=="always 2" ~ "always 2",
+    class=="discharge dependant" & fin.range<1 ~ "discharge dependant (<1m uncert)",
+    class=="discharge dependant" & (fin.range>1 | is.na(fin.range)) ~ "discharge dependant (>1m uncert or unable to calculate sill)",
+    class=="no discharge relationship" ~ "no discharge relationship",
+  )) %>% group_by(final.class) %>% count()
+raw.total = sum(raw.compare$n)
+raw.compare = raw.compare %>% 
+  mutate(pct = round(n/raw.total, 2)) %>% select(-n)
+raw.compare
+
+cal.compare = sill.compare%>% as_tibble() %>% select(-geometry) %>% 
+  mutate(final.class = case_when(
+    class=="always 0" ~ "always 0",
+    class=="always 2" ~ "always 2",
+    class=="discharge dependant" & fin.range<1 ~ "discharge dependant (<1m uncert)",
+    class=="discharge dependant" & (fin.range>1 | is.na(fin.range)) ~ "discharge dependant (>1m uncert or unable to calculate sill)",
+    class=="no discharge relationship" ~ "no discharge relationship",
+  )) %>% group_by(final.class) %>% count()
+cal.total = sum(cal.compare$n)
+cal.compare = cal.compare %>% 
+  mutate(pct = round(n/cal.total, 2)) %>% select(-n)
+cal.compare
+
+
+cal.prep = sill.compare %>% filter(!is.na(fin.sill)) %>% select(obj_id, fin.range, fin.sill) %>% 
+  as_tibble() %>% select(-geometry) %>% 
+  rename(fin.range.cal = fin.range, fin.sill.cal = fin.sill)
+raw.prep =sill.compare.raw  %>% filter(!is.na(fin.sill)) %>% select(obj_id, fin.range, fin.sill) %>% 
+  as_tibble() %>% select(-geometry) %>% 
+  rename(fin.range.raw = fin.range, fin.sill.raw = fin.sill)
+
+summary.prep = cal.prep %>% left_join(raw.prep, by="obj_id") %>% na.omit() %>% 
+  mutate(range.diff = fin.range.raw-fin.range.cal,
+         sill.diff = fin.sill.raw - fin.sill.cal) 
+  
+
+p1 = ggplot()+
+    geom_density(data = summary.prep, aes(x=range.diff, fill="range diff (all)"), alpha=0.3)+
+    geom_density(data = summary.prep %>% 
+                     filter(fin.range.cal<1 & fin.range.raw<1), 
+                   aes(x=range.diff, fill="range diff"), alpha=0.3)+theme_classic()+
+  geom_vline(aes(xintercept=0))+
+  scale_y_continuous(expand = c(0, 0))+xlab("difference in sill range (m)")+xlim(-2.25, 2.25)
+
+
+p2= ggplot()+
+    geom_density(data = summary.prep, aes(x=sill.diff, fill="sill diff (all)"), alpha=0.3)+
+    geom_density(data = summary.prep %>% 
+                     filter(fin.range.cal<1 & fin.range.raw<1), 
+                   aes(x=sill.diff, fill="sill diff"), alpha=0.3)+theme_classic()+
+  geom_vline(aes(xintercept=0))+
+  scale_y_continuous(expand = c(0, 0))+xlab("difference in sill (m)")+xlim(-2.25, 2.25)
+
+p1/p2
+
+```
+
