@@ -49,7 +49,7 @@ library(vip)
 todayDate  = "20230324" # the first data join phase
 
 # Names of files and folders for reflectance data
-import.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/GEE Downloads"
+
 import.sword = "na_sword_reaches_hb82_v14.shp"
 
 # intermediate working directory
@@ -60,6 +60,7 @@ refl.import = 'srCorrected_mackLakes_202303138.feather'
 shapeFiles.filePath = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/shapeFiles"
 lakes.shapeFile = "mackenzieGoodLakes.shp"
 islands.shapeFile = "vectorIslandArea2.shp"
+import.sword = "na_sword_reaches_hb82_v14.shp"
 setwd(shapeFiles.filePath)
 lakes.sf = st_read(lakes.shapeFile)
 islands.sf=st_read(islands.shapeFile)
@@ -77,7 +78,8 @@ crs.plot = "+proj=tcea +lon_0=-134.3847656 +datum=WGS84 +units=m +no_defs"
 setwd(shapeFiles.filePath)
 study.area.large=cbind.data.frame(lon=c(-136.80, -136.80, -133.47, -133.47), 
                  lat=c(67.25, 69.55, 69.55, 67.46)) %>% 
-  st_as_sf(coords=c("lon", "lat")) %>% st_set_crs(4326) %>% st_bbox() %>% st_as_sfc() %>% 
+  st_as_sf(coords=c("lon", "lat")) %>% st_set_crs(4326) %>% st_bbox() %>% 
+  st_as_sfc() %>% 
   st_transform(crs = crs.plot)
 mack.basin.large = st_read(import.sword) %>% 
   st_transform(crs = crs.plot) %>% 

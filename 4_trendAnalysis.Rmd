@@ -49,7 +49,7 @@ todayDate  = "20230324" # the first data join phase
 
 # Names of files and folders for reflectance data
 import.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/GEE Downloads"
-import.sword = "na_sword_reaches_hb82_v14.shp"
+
 
 # intermediate working directory
 int.wd="C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/intermediaryDownloads"
@@ -58,13 +58,11 @@ refl.import = 'srCorrected_mackLakes_202303138.feather'
 #Name of file and folder for lake shapefiles & island polygon shapefiles
 shapeFiles.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/shapeFiles"
 lakes.shapeFile = "mackenzieGoodLakes.shp"
-islands.shapeFile = "vectorIslandArea2.shp"
 setwd(shapeFiles.filePath)
 lakes.sf = st_read(lakes.shapeFile)
-islands.sf=st_read(islands.shapeFile)
+import.sword = "na_sword_reaches_hb82_v14.shp"
 
 images.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/images"
-
 ```
 
 # Import river centerlines and set the projection for all future plots, import classifications
