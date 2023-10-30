@@ -329,6 +329,8 @@ prep= channels.lakes %>% as_tibble() %>%
 setwd(valFile.path)
 lake.class = st_read(valFileName , stringsAsFactors = F) %>% as_tibble() %>% 
   rename(OBJECTID=ID) %>% 
+  group_by(OBJECTID) %>% mutate(row.num=row_number()) %>% filter(row.num==1) %>% 
+  ungroup() %>% 
   mutate(high.dis.class = case_when(
    type == "g1" | type== "g7" | type== "g4" | type=="lowThenMedium" ~ 0,
    type== "g3_5" | type=="mediumThenHigh" | type == "moderateBoth"~ 1,
@@ -357,7 +359,7 @@ trainData <- prep %>% dplyr::filter(year==2020) %>%
 library(caret)
 prep.clust = trainData %>% dplyr::select(-classes)
 prep.clust
-prep.clust=prep.clust[, order(names(prep.clust), decreasing=T)]
+prep.clust=prep.clust[, order(names(prep.clust), decreasing=T)]# right now we do the 'order' thing because it picks which vars are correlated and picks whichever of correlated variables come first to use and discards the other. I wanted it to at least do med_R_ratio rather than med_G_ratio, so I ordered it this way. Could be better coded.
 clust = findCorrelation(prep.clust %>%  cor(method="spearman"), 
                         cutoff=0.8, verbose=T, names=F)
 clust 
@@ -621,7 +623,7 @@ all.classified = cbind(predict(fitted.wf.rf, prep.all), prep.all) %>% as_tibble(
 cols= c("2"="#F8766D", "1"="#00BA38" , "0"="#619CFF")
 
 setwd("C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/intermediaryDownloads")
-write_rds("final.class_20221114.Rdata")
+write_rds(all.classified,"final.class_20221114.Rdata")
 
 
 # save image to disk
@@ -654,6 +656,123 @@ all.classified %>%
 
 
 ```
+
+
+# Analyze spatial patterns in connectivity
+```{r}
+# Distance from edge of island
+## Import islands
+setwd("C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/PiliourasAndRowland/")
+mack.islands = st_read("MackenzieDeltaIslands.shp") %>% 
+  dplyr::select(fid, geometry) %>% 
+  st_transform("EPSG:32608")
+mack.islands$area = units::set_units(st_area(mack.islands), km^2)
+## Import lakes
+setwd(valFile.path)
+lake.sf = st_read(valFileName , stringsAsFactors = F) %>%  
+  rename(OBJECTID=ID) %>% dplyr::select(OBJECTID, geometry) %>% 
+  st_transform("EPSG:32608")
+
+## Join lakes to the island that they are in. 
+islands.join = lake.sf %>% st_join(mack.islands) %>% filter(!is.na(fid))
+
+## Import classification results & group by month
+setwd("C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/intermediaryDownloads")
+results.summary = read_rds("final.class_20221114.Rdata") %>% 
+  dplyr::select(.pred_class, OBJECTID, year, month) %>% 
+  group_by(OBJECTID, month)%>% 
+  summarise(class.median = median(as.numeric(as.character(.pred_class))),
+            count = n()) %>% filter(count>=10) %>% ungroup() 
+
+## fraction of lakes in each island  that are high connectivity for each month... 
+island.grouped = results.summary %>% 
+  left_join(islands.join, by="OBJECTID") %>% filter(!is.na(fid)) %>% 
+  group_by(fid, month, area) %>% 
+  summarise(num.lakes = n(),
+            lakes_1 = sum(class.median>=1.5),
+            pct_1 = lakes_1/num.lakes) %>% 
+  ungroup() %>% filter(num.lakes>=10)
+library(units)
+#not much of a pattern w/ area.
+ggplot()+geom_point(data=island.grouped %>% 
+                      filter(area<set_units(1500, km^2)), 
+                    aes(x=area, y= pct_1))+facet_wrap(~month, nrow=2)  
+# spatial?
+island.grouped %>% 
+  left_join(mack.islands %>% dplyr::select(fid, geometry), by="fid") %>% 
+  st_as_sf() %>% 
+  ggplot()+
+  geom_sf(aes(fill=pct_1))+
+  theme_bw()+ scale_fill_viridis_b() + 
+  facet_wrap(~month)
+
+## Monthly/yearly
+setwd("C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/intermediaryDownloads")
+lake.centroid = lakes.sf %>% st_centroid()
+results = read_rds("final.class_20221114.Rdata") %>% 
+  dplyr::select(.pred_class, OBJECTID, year, month) %>% 
+  mutate(.pred_class = as.numeric(as.character(.pred_class))) %>% 
+  left_join(lake.centroid %>% dplyr::select(OBJECTID, geometry),
+            by="OBJECTID") %>% st_as_sf()
+results$lat = as_tibble(st_coordinates(results))$Y
+
+
+results.lat = results %>% 
+  mutate(lat.group = case_when(
+    lat < 67.75 ~ "< 67.75",
+    lat>=67.75 & lat < 68 ~ "67.75-68.00",
+    lat>=68 & lat <68.25 ~ "68.00-68.25",
+    lat>=68.25 & lat < 68.5 ~"68.25-68.50",
+    lat>=68.5 & lat < 68.75 ~"68.50-68.75",
+    lat>=68.75 & lat < 69 ~"68.75-69.00",
+    lat>=69.00 & lat < 69.25 ~ "69.00-69.25",
+    lat>=69.25 & lat < 69.5 ~ "69.25-69.50",
+    lat>=69.5 ~ "> 69.50"
+  )) %>% as_tibble() %>% select(-geometry, -lat) %>% 
+  group_by(lat.group, year, month) %>% 
+  summarise(count=n(),
+            class.mean = mean(.pred_class)) %>% ungroup()
+
+results.lat.sum = results.lat %>% group_by(lat.group,month) %>% 
+  summarise(max.count = max(count)) %>% ungroup() %>% 
+  right_join(results.lat, by=c("lat.group", "month")) %>% 
+  mutate(pct = count/max.count) %>%  filter(max.count>0.25)
+
+
+results.year.sum = results.lat.sum %>% group_by(year, month) %>% count() %>% filter(n>=9) %>% 
+  right_join(results.lat, by=c("year", "month")) %>% filter(!is.na(n))
+
+
+results.year.sum$lat.group = factor(results.year.sum$lat.group, levels = c("< 67.75", "67.75-68.00", "68.00-68.25", "68.25-68.50", "68.50-68.75",
+                                                        "68.75-69.00", "69.00-69.25", "69.25-69.50", "> 69.50"))
+
+
+
+results.year.sum %>% ggplot()+
+  geom_line(aes(x=lat.group, y = class.mean, color=year, group=year))+
+  scale_color_viridis_c()+
+  theme_bw()+
+  theme(
+    axis.text.x=element_text(angle=45, hjust=1)
+  )+
+  facet_wrap(~month)+coord_flip()
+
+
+## Calculate monthly average connectivity for each lake
+## Calculate lake distances from edge of island
+## Plot connectivity vs lake distance, maybe within each month?
+
+
+
+
+# Longitudinally throughout the delta
+
+
+
+
+```
+
+
 
 
 
@@ -991,6 +1110,27 @@ ggplot(data=all.res, aes(fill=.pred_class))+geom_sf(color=NA)+facet_wrap(~year.g
 
 ```
 
+
+```{r}
+setwd(valFile.path)
+lake.structure = st_read(valFileName , stringsAsFactors = F) %>% as_tibble() %>% 
+  rename(OBJECTID=ID) %>% 
+  mutate(
+    structure.class = case_when(
+      type %in% c("g5", "g6", "g7") ~ "no channel",
+      type %in% c("g2","g2_5", "g3", "g3_5", "g4", 
+                  "moderateBoth", "lowThenMedium", "mediumThenHigh", "g2_add") ~
+        "channel"
+    )
+  ) %>% 
+  dplyr::filter(!is.na(structure.class) ) %>% 
+  dplyr::select(-type)
+
+
+
+
+
+```
 
 
 
