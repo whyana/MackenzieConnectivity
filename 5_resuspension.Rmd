@@ -41,59 +41,71 @@ library(dtplyr)
 todayDate  = "20230324" # the first data join phase
 
 # Names of files and folders for reflectance data
-import.filePath = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/GEE Downloads"
+import.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/GEE Downloads"
 import.sword = "na_sword_reaches_hb82_v14.shp"
 
 # intermediate working directory
-int.wd="C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/intermediaryDownloads"
+int.wd="C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/intermediaryDownloads"
 refl.import = read_feather('srCorrected_mackLakes_202303138.feather')
 refl.import.chan = read_feather('srCorrected_mackChans_20230424.feather')
 
 #Name of file and folder for lake shapefiles & island polygon shapefiles
-shapeFiles.filePath = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/shapeFiles"
+shapeFiles.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/shapeFiles"
 lakes.shapeFile = "mackenzieGoodLakes.shp"
 islands.shapeFile = "vectorIslandArea2.shp"
 setwd(shapeFiles.filePath)
 lakes.sf = st_read(lakes.shapeFile)
 islands.sf=st_read(islands.shapeFile)
 
-images.wd = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/images"
+images.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/images"
 
-# results
+# import results
 setwd(int.wd)
 all.classified.filter = read_feather(paste0("final.class_", todayDate, ".feather")) 
 
+# Set crs for plots
 crs.plot = "+proj=tcea +lon_0=-134.3847656 +datum=WGS84 +units=m +no_defs"
 ```
 
 
-# join lake and channel Nir-band data, 
+# Analyze for resuspension!
 ```{r}
-
-island.lakes = lakes.sf %>% st_transform(crs.plot) %>% select(OBJECTID, geometry) %>% st_join(islands.sf %>% st_transform(crs.plot) %>% select(fid, geometry)) %>% filter(!is.na(fid)) %>% 
+# Figure out which island each lake is within and join accordingly
+island.lakes = lakes.sf %>% st_transform(crs.plot) %>% 
+  select(OBJECTID, geometry) %>% 
+  st_join(islands.sf %>% st_transform(crs.plot) %>% 
+            select(fid, geometry)) %>% 
+  filter(!is.na(fid)) %>% 
   as_tibble() %>% select(-geometry)
 
-
-lake.prep = refl.import %>% select(OBJECTID, Nir_mean, Landsat, dateTime, date, WRS_PATH, WRS_ROW, Red_count) %>%# as_tibble() %>% 
+# If there are more than one observation of each lake in a day, keep only the one with the most pixels. 
+lake.prep = refl.import %>% select(OBJECTID, Nir_mean, Landsat, dateTime, date, WRS_PATH, WRS_ROW, Red_count) %>%
   rename(Nir_lake = Nir_mean) %>% 
-  group_by(OBJECTID, date) %>%  #only need to do if we have more than 1 obs per day (pick one with most pixels)
+  group_by(OBJECTID, date) %>%  
   mutate(my_ranks = order(Red_count, decreasing=TRUE)) %>% 
   filter(my_ranks==1) %>% ungroup() %>% select(-my_ranks) %>% 
   left_join(island.lakes, by="OBJECTID", multiple="all") %>% filter(!is.na(fid))
 
-chan.prep=refl.import.chan %>% select(OBJECTID, Nir_mean, Landsat,dateTime, date, WRS_PATH, WRS_ROW) %>% as_tibble() %>% 
+chan.prep=refl.import.chan %>% 
+  select(OBJECTID, Nir_mean, Landsat,dateTime, date, WRS_PATH, WRS_ROW) %>%
+  as_tibble() %>% 
   rename(Nir_chan = Nir_mean, fid=OBJECTID) %>% mutate(fid=fid*-1)
 
+# Join lake and channel info 
 lake.chan.combo = lake.prep %>% 
   left_join(chan.prep, by=c("fid", "dateTime", "date", "Landsat", "WRS_PATH", "WRS_ROW")) %>% 
   filter(!is.na(Nir_chan)) %>% 
   mutate(Nir_ratio = Nir_lake/Nir_chan)
 
+# Join lake and channel info with the connectivity classification associated with the observation
 lake.chan.class = lake.chan.combo %>% 
-  left_join(all.classified.filter %>% select(.pred_class, OBJECTID, date), by=c("OBJECTID", "date")) %>% 
+  left_join(all.classified.filter %>% 
+              select(.pred_class, OBJECTID, date), by=c("OBJECTID", "date")) %>% 
   mutate(.pred_class = as.numeric(as.character(.pred_class)))
+
 length(unique(lake.chan.class$OBJECTID))
-  
+
+# Get list of observations with high NIR ratios where the lakes were classified as high connectivity (class 2). Keep only one observation for each lake. Export these observations for import into a GEE script for visual inspection  
 lake.chan.export = lake.chan.class %>% filter(Nir_ratio>1.3 & .pred_class==2) %>% 
    group_by(OBJECTID) %>% mutate(group_id=row_number()) %>% filter(group_id==1) %>% ungroup() %>% 
     select(OBJECTID, date, dateTime, .pred_class, Nir_ratio, fid) %>%
@@ -103,31 +115,30 @@ lake.chan.export = lake.chan.class %>% filter(Nir_ratio>1.3 & .pred_class==2) %>
 
 setwd(int.wd)
 st_write(lake.chan.export, "Nir1_3_class2.shp")
-# data.join = lakesChan.all%>% lazy_dt() %>% 
-#   left_join(metadata.df, by=c("system:time_start", "dateTime", "date", "WRS_ROW", "WRS_PATH", "Landsat")) %>% 
-#   mutate(year=year(date))
+
+# Import the data into GEE and complete the analysis. Link to GEE script here: https://code.earthengine.google.com/b2a63a5cd472a802a08c1a5d794fbf85
 
 
-# Import GEE classified data https://code.earthengine.google.com/276c959aad57ad8ef2d87115c29bc86f
-setwd("C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/GEE Downloads")
+# Import the data that you just inspected in GEE! 
+setwd(import.filePath)
 resus.class = st_read("resuspension_20230425.shp") %>% 
   mutate(dateTime = as_datetime(date*0.001),
          date = as_date(dateTime))
 
+# Print results for use in the manuscript
+## Number of observations classified as cloud, ice, not resuspension, or possible resuspension
 resus.class %>% 
   group_by(type) %>% 
   count()
 
-
-
-
+# Total number of observations that were flagged as needing to be looked at for resuspension
 all.lake.summary =  lake.chan.class %>% filter(Nir_ratio>1.3 & .pred_class==2) %>% group_by(OBJECTID) %>% count() %>% ungroup()
+sum(all.lake.summary$n)
 
-
-resus.class %>% left_join(all.lake.summary, by="OBJECTID") %>% 
-  ggplot()+geom_jitter(aes(x=type, y= n, fill=type))+theme_bw()
-
-resus = resus.class %>% left_join(all.lake.summary, by="OBJECTID") %>% as_tibble() %>% select(-geometry) %>% 
+# Assuming that every flagged observation of a lake should be classified the same way with regaurds to resuspension, calculate the number of total resuspension observations you'd expect
+resus = resus.class %>% 
+  left_join(all.lake.summary, by="OBJECTID") %>% as_tibble() %>% 
+  select(-geometry) %>% 
   filter(type=="possibleResuspension")
 sum(resus$n)
 ```
