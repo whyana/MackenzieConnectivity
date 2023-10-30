@@ -43,17 +43,17 @@ library(skimr)
 library(vip)
 ```
 
-# Import files / set constants
+# Set filenames & set constants
 ```{r}
 # dates for version control
 todayDate  = "20230324" # the first data join phase
 
 # Names of files and folders for reflectance data
-import.filePath = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/GEE Downloads"
+import.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/GEE Downloads"
 import.sword = "na_sword_reaches_hb82_v14.shp"
 
 # intermediate working directory
-int.wd="C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/intermediaryDownloads"
+int.wd="C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/intermediaryDownloads"
 refl.import = 'srCorrected_mackLakes_202303138.feather'
 
 #Name of file and folder for lake shapefiles & island polygon shapefiles
@@ -63,8 +63,11 @@ islands.shapeFile = "vectorIslandArea2.shp"
 setwd(shapeFiles.filePath)
 lakes.sf = st_read(lakes.shapeFile)
 islands.sf=st_read(islands.shapeFile)
-
-images.wd = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/images"
+# Image export folder
+images.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/images"
+# Piliouras shapefile folder
+pil.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/PiliourasAndRowland/"
+pil.file = "MackenzieDeltaIslands.shp"
 
 ```
 
@@ -94,6 +97,7 @@ getmode <- function(v) {
 ```
 
 # Plot a summary of connectivity through time.
+## Figure 5 and Supplemental Figure 5
 ```{r}
 # Prep data for plotting
 plot.prep = all.classified.filter %>% lazy_dt() %>% #convert to lazy DT for faster processing
@@ -160,12 +164,10 @@ sd.plot.lake = plot.prep %>% filter(Key=="sd.score") %>%
   geom_sf_text(data=plot.labs.sd,aes(label=tag))+
   scale_fill_viridis_c(option="plasma", limits=c(0,1), oob=squish,
                        labels=c(0, 0.25, 0.5, 0.75,1))+
-  theme(#axis.text = element_text(angle=45, hjust=1, size=10),
+  theme(
         strip.text = element_blank(),
-        #legend.title = element_text(size=10, face="bold"),
         legend.text=element_text(size=10), 
         legend.position="right",
-       # legend.key.width = unit(0.60, "in"),
         legend.title = element_text(size=10, face="bold"))+
   labs(fill="Std. Dev.\nConnectivity\nScore")
 
@@ -177,28 +179,21 @@ mean.plot.lake = plot.prep %>% filter(Key=="mean.score") %>%
   geom_sf_text(data=plot.labs.mean,aes(label=tag))+
   scale_fill_viridis_c( limits=c(0,2), oob=squish,
                        labels=c(0, 0.5, 1, 1.5,2))+
-  #geom_sf(data=mack.basin.large, color="grey65", size=0.01)+
-  theme(#axis.text = element_text(angle=45, hjust=1, size=10),
+  theme(
         strip.text = element_text(size=12, face="bold"),
-      #  legend.title = element_text(size=14, face="bold"),
         legend.text=element_text(size=10), 
         legend.position="right",
-        #legend.key.width = unit(0.60, "in"),
         legend.title = element_text(size=10, face="bold"))+
-  labs(fill="Mean\nConnectivity\nScore")#+
-  #guides(fill = guide_colourbar(title.position="top", title.hjust = 0.5))
+  labs(fill="Mean\nConnectivity\nScore")
 mean.plot.lake/sd.plot.lake
 
 setwd(images.wd)
 ggsave(paste0(todayDate, "lakeMonthlySummary.png"), width=8, height = 6, units="in") 
 
 
-
-
 # Plot summary statistics of connectivity through time in islands
-pil.wd = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/PiliourasAndRowland/"
 setwd(pil.wd)
-mack.islands = st_read("MackenzieDeltaIslands.shp") %>%
+mack.islands = st_read(pil.file) %>%
   dplyr::select(fid, geometry) %>%
   st_transform(crs.plot)
 
@@ -238,16 +233,11 @@ mean.plot.islands = ggplot(data = island.summary )+
   theme_void()+
   theme(axis.text = element_blank(),
         strip.text = element_text(size=12, face="bold"),
-      #  legend.title = element_text(size=14, face="bold"),
         legend.text=element_text(size=10), 
         legend.position="right",
-        #legend.key.width = unit(0.60, "in"),
         legend.title = element_text(size=10, face="bold"), 
       panel.border=element_blank())+
-  labs(fill="Mean\nConnectivity\nScore")#+
-  #guides(fill = guide_colourbar(title.position="top", title.hjust = 0.5))
-
-
+  labs(fill="Mean\nConnectivity\nScore")
 
 sd.plot.islands = ggplot(data = island.summary)+
   geom_sf(aes(fill=sd.con), color=NA)+
@@ -258,16 +248,13 @@ sd.plot.islands = ggplot(data = island.summary)+
   theme_void()+
   theme(axis.text = element_blank(),
         strip.text = element_blank(),
-      #  legend.title = element_text(size=14, face="bold"),
         legend.text=element_text(size=10), 
         legend.position="right",
-        #legend.key.width = unit(0.60, "in"),
         legend.title = element_text(size=10, face="bold"),
       panel.border = element_blank(),
       panel.background = element_blank(),
       plot.background = element_blank())+
-  labs(fill="Std. Dev.\nConnectivity\nScore")#+
-  #guides(fill = guide_colourbar(title.position="top", title.hjust =   0.5)) 
+  labs(fill="Std. Dev.\nConnectivity\nScore")
 
 mean.plot.islands / sd.plot.islands
 setwd(images.wd)
@@ -275,6 +262,7 @@ ggsave(paste0(todayDate, "islandMonthlySummary.png"), width=8, height = 6, units
 ```
 
 # plot number of observations per month
+## Figure 2
 ```{r}
 # prep data for plotting
 plot.uncert.prep = all.classified.filter %>% 
@@ -332,6 +320,7 @@ ggsave(paste0(todayDate, "_MonthlyUncertMap.png"), height=3, width=8, units="in"
 ```
 
 # plot study area figure
+## Figure 1 
 ```{r}
 # Prep for the large map
 n.am <- sfheaders::sf_multipolygon(obj = map_data("world"),
@@ -409,9 +398,10 @@ setwd(images.wd) #todayDate
 ggsave(paste0("20230423","_studyArea.pdf"), device="pdf", width=4, height=5, units="in")
 ```
 
-#summarize number of connected lakes
+# Summarize connected lake area during the month after peak discharge at Arctic Red River
+## Figure 6
 ```{r}
-# Get yearly timing of peak flow at inuvik
+# Get yearly timing of peak flow at Arctic Red River
 complete.flows = hy_daily_flows(
   station_number=c("10LC014"),
   start_date = "1973-01-01") %>% 
@@ -475,19 +465,7 @@ getmode <- function(v) {
    uniqv[which.max(tabulate(match(v, uniqv)))]
 }
 
-connected.area.prep = filt.obs %>% 
-  select(.pred_class, OBJECTID, doy, month, year) %>% 
-  mutate(.pred_class=as.numeric(as.character(.pred_class))) %>% 
-  group_by(OBJECTID) %>% 
-  summarise(mean.score=mean(.pred_class, na.rm=T),
-            med.score = median(.pred_class, na.rm=T),
-            mod.score = getmode(.pred_class),
-            sd.score = sd(.pred_class),
-            count= n() ) %>% dplyr::filter(count>=10) %>% 
-  left_join(lakes.area, by="OBJECTID") %>% st_as_sf()
-
-
-# do the same thing, but for 2 week groups after peak flow
+# Summarize connected area by 2 week period after peak discharge
 connected.area.prep = filt.obs %>% 
   select(.pred_class, OBJECTID, doy, month, year, timegroup) %>% 
   mutate(.pred_class=as.numeric(as.character(.pred_class))) %>% 
@@ -498,7 +476,7 @@ connected.area.prep = filt.obs %>%
             sd.score = sd(.pred_class),
             count= n() ) %>% dplyr::filter(count>=10) %>% 
   left_join(lakes.area, by="OBJECTID") %>% st_as_sf()
-
+# Loop through using different thresholds to define connectivity
 thresh = seq(0,2, by=0.25)
 all.df = NULL
 for (z in 1:length(thresh)){
@@ -514,39 +492,25 @@ for (z in 1:length(thresh)){
     pct.area = con.area/area.observed
     con.vol = con.area* (1*0.001)
     con.vol.pct = (con.area* (1*0.001))/19.9
-    combo.df = data.frame(thresh = thrshhld,con.area.km = con.area, pct.area = pct.area, con.vol.pct=con.vol.pct, con.vol=con.vol, timegroup = d)
+    combo.df = data.frame(thresh = thrshhld,con.area.km = con.area, 
+                          pct.area = pct.area, con.vol.pct=con.vol.pct,
+                          con.vol=con.vol, timegroup = d, 
+                          observed.area = area.observed)
     all.df = rbind.data.frame(all.df, combo.df)
   }
-  
 }
-all.df
+
+# Plot connectivity pct area using a class 1 threshold
 all.df %>% 
-  ggplot(aes(x=thresh, y=pct.area, color = as.factor(timegroup), group=timegroup))+geom_line()+geom_point()+
-  theme_bw()+ylab("percent of total lake area")+
+  ggplot(aes(x=thresh, y=pct.area, color = as.factor(timegroup),
+             group=timegroup, 
+             shape =
+               as.factor(timegroup)))+geom_line()+geom_point()+
+  theme_bw()+ylab("percent of lake area")+
   xlab("mean connectivity class threshold")+
   theme(axis.text = element_text(size=12),
         axis.title = element_text(size=12, face="bold"))+
-  scale_x_continuous(breaks=c(0,0.5, 1,1.5, 2))+labs(color="days after peak flow")
-
-# ylab label expression(bold(lake~area~greater~than~threshold~'('~km^2~')'))
-con.plot=connected.area.prep %>% filter(mean.score>=1) %>% 
-  ggplot()+
-  geom_sf(data=mack.basin.large, color="grey40", size=0.25)+
-  geom_sf(data=connected.area.prep, fill=NA, color=NA)+
-  geom_sf(fill="forestgreen", color=NA)+theme_void()
-
-all.plot=connected.area.prep %>% 
-  ggplot()+
-  geom_sf(data=mack.basin.large, color="grey40", size=0.25)+
-  geom_sf(fill="darkorange2", color=NA)+theme_void()
-  
-all.plot+con.plot
-setwd(images.wd)
-ggsave("connectedLakesMap.png", width=8, height = 6, units="in")
-# save image
-setwd(images.wd)
-ggsave(paste0(todayDate, "connectedLakeArea.pdf"), width=4, height=4, units = "in")
-# compare to piliouras connected lake area 637.1 km2
+  scale_x_continuous(breaks=c(0,0.5, 1,1.5, 2))
 
 
 # plot variability of flow
