@@ -1,0 +1,771 @@
+---
+title: "1_ClassifyDeltaicLakes"
+output: html_document
+date: "2023-03-13"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libraries
+```{r}
+library(tidyverse)
+library(sf)
+library(lubridate)
+library(grDevices)
+library(mapview)
+library(extrafont)
+library(ggpubr)
+library(ggmap)
+library(RgoogleMaps)
+library(broom)
+library(feather)
+library(tidyhydat)
+library(sp)
+library(data.table)
+library(ggalluvial)
+library(patchwork)
+library(magick)
+library(units)
+library(Kendall)
+library(ggspatial)
+library(dtplyr)
+#Import libraries for Random Forest
+library(caret) 
+library(e1071)
+library(Boruta)
+library(tidymodels)
+library(skimr)
+library(vip)
+```
+
+# Imports and file paths
+```{r}
+# dates for version control
+todayDate  = "20230324" # the first data join phase
+
+# Names of files and folders for reflectance data
+import.filePath = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/GEE Downloads"
+import.sword = "na_sword_reaches_hb82_v14.shp"
+
+# intermediate working directory
+int.wd="C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/intermediaryDownloads"
+refl.import = 'srCorrected_mackLakes_20230324.feather'
+refl.import.raw = 'srMunged_Original_mackLakes_20230324.feather'
+
+#Name of file and folder for lake shapefiles & island polygon shapefiles
+shapeFiles.filePath = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/shapeFiles"
+lakes.shapeFile = "mackenzieGoodLakes.shp"
+islands.shapeFile = "vectorIslandArea2.shp"
+setwd(shapeFiles.filePath)
+lakes.sf = st_read(lakes.shapeFile)
+islands.sf=st_read(islands.shapeFile)
+images.wd = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/images"
+
+# 
+# # Name of file and folder for GECI validation data
+valFile.path="C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/GEE Downloads/trainingData"
+valFileName = "trainingData_1819lakes.shp"
+```
+
+# Classify using corrected reflectances
+## Import reflectance data
+```{r}
+# import lake reflectance and add reflectance combinations. Remove uncecessary columns
+setwd(int.wd)
+all.lakes = read_feather(refl.import) %>% lazy_dt() %>% 
+  mutate(GreenBlue_mean = Green_mean/Blue_mean,
+         Ndssi_mean = (Blue_mean-Nir_mean)/(Blue_mean+Nir_mean),
+         Nsmi_mean = (Red_mean+Green_mean-Blue_mean)/(Red_mean+Green_mean+Blue_mean),
+         Nsmi_mod_mean = (Red_mean-Green_mean-Blue_mean)/(Red_mean+Green_mean+Blue_mean),
+         Ndti_mean = (Red_mean-Green_mean)/(Red_mean+Green_mean), #https://www.sciencedirect.com/science/article/pii/S0034425706002811
+         NirSwir1_mean = Nir_mean-Swir1_mean, 
+         NirGreen_mean = Nir_mean/(1-Green_mean),
+         BlueNir_mean = Blue_mean/Nir_mean,
+         NirRedBlue_mean = Nir_mean/(Red_mean+Blue_mean)) %>% 
+  select(-`system:time_start`, -snowIceSLIDE_mean, -Landsat, 
+         -CLOUD_COVER_mean, -WRS_PATH, -WRS_ROW, -max.pix, -dateTime,
+         -CLOUD_COVER, -EARTH_SUN_DISTANCE, -L1_PROCESSING_SOFTWARE_VERSION,
+         -SUN_AZIMUTH) # remove extra columns
+
+# group by date and select only the observation with the most number of pixels 
+lakes.filt = all.lakes %>% 
+  group_by(OBJECTID, date) %>%  #only need to do if we have more than 1 obs per day (pick one with most pixels)
+  mutate(my_ranks = order(Red_count, decreasing=TRUE)) %>% 
+  filter(my_ranks==1) %>% ungroup()
+
+
+
+```
+
+## Prep data for classification
+```{r}
+prep.2020= lakes.filt %>%filter(year==2020) %>% 
+  mutate(group = case_when(
+    (doy>=162 &doy<=182) ~ 
+      "high discharge", #training imagery from high discharge period in 2020
+    (doy>235 & doy<=254)~
+      "low discharge" # training imagery from low discharge period in 2020
+  )) %>% drop_na() %>% 
+  dplyr::group_by(OBJECTID, year, group) %>%
+  dplyr::summarise(med_dw_m = median(dom_wv_mean),
+           med_R_m = median(Red_mean),
+           med_B_m = median(Blue_mean),
+           med_G_m = median(Green_mean),
+           med_Nir_m = median(Nir_mean),
+           med_Gb_m = median(GreenBlue_mean),
+           med_Ndssi_m = median(Ndssi_mean),
+           med_Nsmi_m = median(Nsmi_mean),
+           med_Nsmi_mod_m = median(Nsmi_mod_mean),
+           med_Ndti_m = median(Ndti_mean),
+           med_NirSwir1_m = median(NirSwir1_mean),
+           med_NirGreen_m = median(NirGreen_mean),
+           med_BlueNir_m = median(BlueNir_mean),
+          med_NirRedBlue_m = median(NirRedBlue_mean),
+           count=n()
+           ) %>% ungroup() %>% 
+  dplyr::filter(count>=2) %>% as_tibble()# require at least 2 or more observations in each period
+```
+
+## Enact random forest classification
+```{r}
+# Import training/testing data into the script, break our much larger classification scheme into 3 classes
+setwd(valFile.path)
+lake.class = st_read(valFileName , stringsAsFactors = F) %>% as_tibble() %>% 
+  rename(OBJECTID=ID) %>% 
+  group_by(OBJECTID) %>% mutate(row.num=row_number()) %>% filter(row.num==1) %>% 
+  dplyr::select(-row.num) %>% 
+  ungroup() %>% 
+  mutate(high.dis.class = case_when(
+   type == "g1" | type== "g7" | type== "g4" | type=="lowThenMedium" ~ 0,
+   type== "g3_5" | type=="mediumThenHigh" | type == "moderateBoth"~ 1,
+   type == "g2_5" | type == "g3"  | type =="g6" | type == "g2" | type=="g5" |type=="g2_add" ~ 2
+  ),
+  low.dis.class = case_when(
+    type == "g1" | type== "g7" | type== "g4" | type== "g3_5" | type == "g3"  | type =="g6"~ 0 ,
+    type == "g2_5" | type == "moderateBoth" | type=="lowThenMedium" ~ 1,
+    type == "g2" | type=="g5" |type=="g2_add" | type=="mediumThenHigh" ~ 2
+  )
+  ) %>% 
+  gather(Key, classes, -OBJECTID, -type, -geometry) %>% 
+  mutate(group = ifelse(Key=="high.dis.class", "high discharge", "low discharge")) %>% 
+  dplyr::select(-Key, -type, -geometry) %>% 
+  dplyr::filter(!is.na(classes) )  # Remove NA class values -- includes lakes whose class was obscured by clouds or bad imagery
+
+# join training/testing classes with reflectance data
+trainData <- prep.2020 %>%   
+  left_join(lake.class, by=c("OBJECTID", "group")) %>% 
+  dplyr::select(-OBJECTID, -year, -count, -group) %>% drop_na() 
+
+
+# remove unimportant variables using the Boruta Method
+attach(trainData)
+colnames(trainData)
+set.seed(2000)
+## apply the boruta
+boruta.train <- Boruta(classes~., data = trainData,
+                       mcAdj = TRUE, pValue = 0.01,doTrace = 2,ntree = 50)
+## print the results of the boruta
+print(boruta.train)
+boruta.train$finalDecision
+## plot the results of the boruta
+plot(boruta.train, colCode=c("lightgreen", "yellow", "red", "blue"),
+     cex.axis=.7, las=2, xlab="",sort=TRUE, main="") 
+## Get rid of tentative (yellow on the plot)
+boruta.bank=TentativeRoughFix(boruta.train)
+
+plot(boruta.bank, colCode=c("lightgreen", "yellow", "red", "blue"),
+     cex.axis=.7, las=2, xlab="",sort=TRUE, main="") 
+
+
+##Select the variables to use during the classification
+important.cols=getSelectedAttributes(boruta.bank, withTentative = F) 
+bank_df <- attStats(boruta.bank)
+print(bank_df) #visualize variable importance  
+bank_df$variable = rownames(bank_df)
+bank_df=bank_df %>% arrange(medianImp)
+bank_df$variable = factor(bank_df$variable, levels=bank_df$variable)
+
+# keep NirSwir1 band, and then remove things that are highly correlated to hit (pos or neg)
+library(corrplot)
+library(RColorBrewer)
+
+cor.matrix = cor(trainData %>% select(-classes), method="spearman")
+corrplot(cor.matrix, type="upper")
+rownm = rownames(cor.matrix)
+cor.tibble = cor.matrix %>% as_tibble()
+cor.tibble$variable = rownm
+remove.variables = cor.tibble %>% 
+  filter(abs(med_NirSwir1_m) >=0.8) %>% 
+  filter(variable!="med_NirSwir1_m")%>% select(med_NirSwir1_m, variable)
+remove.variables = remove.variables$variable
+remove.variables
+
+`%ni%` <- Negate(`%in%`)
+filtered.trainData = subset(trainData, select = names(trainData) %ni% remove.variables)
+
+# look through the remaining variables and make sure there aren't any other correlations. If there are, remove them.
+filt.cor = cor(filtered.trainData %>% select(-classes), method="spearman")
+filt.index = caret::findCorrelation(filt.cor, cutoff=0.8)
+
+keep.names = colnames(filtered.trainData[,-filt.index] %>% select(-classes)) # these are the column names to keep
+
+# Prep data for random forest classification, 
+set.seed(123)
+## Join the reflectance and lake classification data,keep only important less correlated columns
+geci.val =  prep.2020 %>% 
+  left_join(lake.class, by=c("OBJECTID", "group")) %>% 
+  dplyr::select(c("OBJECTID","classes", all_of(keep.names))) %>% drop_na() %>% 
+  mutate(classes=as.factor(classes))
+## look at the data to make sure it is as expected
+skimr::skim(geci.val)
+## split data into test and train
+set.seed(234)
+geci.split = initial_split(geci.val, strata=classes)
+geci.train = training(geci.split)
+geci.test = testing(geci.split)
+
+geci.train %>% group_by(classes) %>% count()
+geci.test %>% group_by(classes) %>% count()
+
+# Start random forest classification
+geci.rec =recipe(classes ~., data=geci.train) %>% 
+  update_role(OBJECTID, new_role = "OBJECTID")
+
+geci.pre=prep(geci.rec)
+geci.juiced = juice(geci.pre)
+geci.juiced %>% count(classes)
+## Make model specifications & get ready to tune
+tune.spec = rand_forest(
+  mtry=tune(), #when you are making leaves of the tree, how many do you sample at each split--all predictors or just a few
+  trees = 500,
+  min_n=tune()# How long do you keep splitting. How many data points have to be in a node before you stop splitting
+  ) %>% 
+  set_mode("classification") %>% set_engine("ranger") #ranger is just one way of doing random forest
+tune.wf=workflow() %>% 
+  add_recipe(geci.rec) %>% 
+  add_model(tune.spec)
+## Train hyperparameters with 5-fold cross validation
+set.seed(345)
+geci.fold  = vfold_cv(geci.train, v=5, strata=classes)
+## tune parameters
+tune.res=tune_grid(
+  tune.wf,
+  resamples=geci.fold,
+  grid=20
+)
+## take a look at parameters
+tune.res %>% collect_metrics() #look at all the metrics
+tune.res %>% select_best("roc_auc") #select best accuracy
+tune.res %>% 
+  collect_metrics() %>% 
+  dplyr::filter(.metric=="roc_auc") %>% 
+  dplyr::select(mean, min_n, mtry) %>% 
+  pivot_longer(min_n:mtry,
+               values_to="value",
+               names_to="parameter") %>% 
+  ggplot(aes(value, mean, color=parameter))+
+  geom_point(show.legend="FALSE")+
+  facet_wrap(~parameter, scales="free_x")+theme_bw()+
+  theme(axis.text = element_text(size=12),
+        axis.title = element_text(size=14, face="bold"),
+        strip.text = element_text(size=14, face="bold"))+ylab("mean ROC AUC ")
+
+set.seed(456)
+
+## select the best option based on the ROC_AUC parameter
+best.acc =select_best(tune.res, "roc_auc") 
+final.rf=finalize_model(
+  tune.spec,
+  best.acc
+)
+## Check out variable importance for the model as a whole
+final.rf %>% set_engine("ranger", importance="permutation") %>% 
+  fit(classes~.,
+      data = juice(geci.pre) %>% dplyr::select(-OBJECTID)) %>% 
+  vip(geom="point")+theme_bw()+
+  theme(axis.text = element_text(size=12))
+setwd(images.wd)
+ggsave("importanceRF.png")
+ggsave("importanceRF.pdf", device="pdf")
+# see how the model does on the testing data
+final.wf = workflow() %>% 
+  add_recipe(geci.rec) %>% 
+  add_model(final.rf)
+final.res=final.wf %>% last_fit(geci.split)
+final.res %>% collect_metrics()
+final.res %>% collect_predictions() 
+
+# Select the final model & apply it to the training/testing dataset
+fitted.wf.rf= pluck(final.res, 6)[[1]]
+train.ids = geci.train$OBJECTID
+test.ids = geci.test$OBJECTID
+final.pred.cm = cbind(predict(fitted.wf.rf, geci.val), geci.val) %>% as_tibble() %>% 
+  dplyr::select(OBJECTID, .pred_class, classes)%>% rename(.obs_class = classes) %>% 
+  mutate(split=case_when(
+    OBJECTID %in% train.ids~"train", 
+    OBJECTID %in% test.ids~"test"))
+
+## Save the training/test classifications
+setwd(int.wd)
+write_rds(final.pred.cm, paste0("predictions_traintest_",todayDate, ".Rdata"))
+final.pred.cm=read_rds(paste0("predictions_traintest_",todayDate, ".Rdata"))
+## Plot a confusion matrix
+### Just testing split
+table.test=confusionMatrix(final.pred.cm[final.pred.cm$split=="test",]$.pred_class,
+                      final.pred.cm[final.pred.cm$split=="test",]$.obs_class)
+### All training and testing
+table.all=confusionMatrix(final.pred.cm$.pred_class,
+                      final.pred.cm$.obs_class)
+
+table.test
+table.all
+
+# Calculate Gwets AC1 (alternative to kappa statistic) https://cran.r-project.org/web/packages/irrCAC/vignettes/weighting.html
+#relevant paper https://support.sas.com/resources/papers/proceedings/proceedings/forum2007/186-2007.pdf
+#install.packages("irrCAC")
+library(irrCAC)
+
+test.cm  = table.test$table
+q = nrow(test.cm)
+gwet.ac1.table(test.cm, weights = linear.weights(1:q))
+
+library(ggalluvial)
+alluvial.prep= cbind(predict(fitted.wf.rf, geci.val), geci.val) %>% as_tibble() %>%  # apply the model
+  dplyr::select(OBJECTID, .pred_class, classes)%>% rename(.obs_class = classes) %>%  # shape the data
+  mutate(split=case_when(
+    OBJECTID %in% train.ids~"train", 
+    OBJECTID %in% test.ids~"test")) %>% # group the data into training vs testing
+  dplyr::filter(split=="test") %>%  # select only test data
+  group_by(.pred_class, .obs_class) %>% summarise(freq=n()) 
+
+
+ggplot(data=alluvial.prep, aes(axis1=.obs_class, axis2 = .pred_class, y=freq))+
+  geom_alluvium(aes(fill=.pred_class), width=0)+
+  geom_stratum(aes(fill=.pred_class), width=0.15, color="white")+
+ # geom_text(stat="stratum", size=4)+
+  scale_fill_manual(values=c("#619CFF", "#00BA38", "#F8766D"))+
+  geom_label(stat = "stratum",
+            aes(label = after_stat(stratum)), size=12) +
+  # scale_x_discrete(limits = c("Survey", "Response"),
+  #                  expand = c(0.15, 0.05)) +
+  theme_void()+theme(legend.title=element_blank(), 
+                     legend.position = "none")
+
+setwd(images.wd)
+ggsave("alluvial.png", device="png", width=7.5, height = 7, units="in")
+ggsave("alluvial.pdf", device="pdf", width=7.5, height = 7, units="in")
+
+```
+
+## Apply model to all years of data
+```{r}
+setwd(int.wd)
+# select all data, rename variables so that they match the model
+prep.all= lakes.filt  %>% 
+  rename(med_dw_m = dom_wv_mean,
+           med_R_m = Red_mean,
+           med_B_m = Blue_mean,
+           med_G_m = Green_mean,
+           med_Nir_m = Nir_mean,
+           med_Gb_m = GreenBlue_mean,
+           med_Ndssi_m = Ndssi_mean,
+           med_Nsmi_m = Nsmi_mean,
+           med_Nsmi_mod_m = Nsmi_mod_mean,
+           med_Ndti_m = Ndti_mean,
+           med_NirSwir1_m = NirSwir1_mean,
+           med_NirGreen_m = NirGreen_mean,
+           med_BlueNir_m = BlueNir_mean,
+          med_NirRedBlue_m = NirRedBlue_mean) %>%
+  dplyr::select(c("OBJECTID","year","month","date","doy" ,all_of(keep.names))) %>% drop_na() %>% 
+  as_tibble()
+
+
+# Apply the classification and convert resulting dataframe in to a spatial object
+set.seed(500)
+all.classified = cbind(predict(fitted.wf.rf, prep.all), prep.all) %>% as_tibble() %>% 
+  mutate(doy=yday(date)) %>% 
+  left_join(lakes.sf %>% dplyr::select(-count), by="OBJECTID") %>% arrange(year, month)
+final.class = all.classified %>% select(-geometry)
+
+# # import shoreline and buffer it by 5km, then remove lakes in that buffer, and filter them out of the results
+# setwd("C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/shapeFiles")
+# shoreline = st_read("MackenzieShorelineUTM8N.shp")
+# shoreline.buffer = st_buffer(shoreline, dist = 10000) # distance is in the units of the projection (m)
+# intersect.list = st_intersects(lakes.sf %>% st_transform("EPSG:32608"), shoreline.buffer)
+# intersect.lakes =lakes.sf[lengths(intersect.list)>0,]
+# 
+# all.classified.filter = subset(all.classified, !(OBJECTID %in% intersect.lakes$OBJECTID))
+# final.class = all.classified.filter %>% select(-geometry)
+
+setwd(int.wd)
+write_feather(final.class,paste0("final.class_", todayDate, ".feather"))
+
+```
+
+
+# Do the exact same analysis as above, but using the raw reflectance data instead of the corrected reflectance data
+## Import reflectance data
+```{r}
+# import lake reflectance and add reflectance combinations. Remove uncecessary columns
+setwd(int.wd)
+all.lakes.raw = read_feather(refl.import.raw) %>% lazy_dt() %>% 
+  mutate(GreenBlue_mean = Green_mean/Blue_mean,
+         Ndssi_mean = (Blue_mean-Nir_mean)/(Blue_mean+Nir_mean),
+         Nsmi_mean = (Red_mean+Green_mean-Blue_mean)/(Red_mean+Green_mean+Blue_mean),
+         Nsmi_mod_mean = (Red_mean-Green_mean-Blue_mean)/(Red_mean+Green_mean+Blue_mean),
+         Ndti_mean = (Red_mean-Green_mean)/(Red_mean+Green_mean), #https://www.sciencedirect.com/science/article/pii/S0034425706002811
+         NirSwir1_mean = Nir_mean-Swir1_mean, 
+         NirGreen_mean = Nir_mean/(1-Green_mean),
+         BlueNir_mean = Blue_mean/Nir_mean,
+         NirRedBlue_mean = Nir_mean/(Red_mean+Blue_mean)) %>% 
+  select(-`system:time_start`, -snowIceSLIDE_mean, -Landsat, 
+         -CLOUD_COVER_mean, -WRS_PATH, -WRS_ROW, -max.pix, -dateTime,
+         -CLOUD_COVER, -EARTH_SUN_DISTANCE, -L1_PROCESSING_SOFTWARE_VERSION,
+         -SUN_AZIMUTH) # remove extra columns
+
+# group by date and select only the observation with the most number of pixels 
+lakes.filt.raw = all.lakes.raw %>% 
+  group_by(OBJECTID, date) %>%  #only need to do if we have more than 1 obs per day (pick one with most pixels)
+  mutate(my_ranks = order(Red_count, decreasing=TRUE)) %>% 
+  filter(my_ranks==1) %>% ungroup()
+
+
+
+```
+
+## Prep data for classification
+```{r}
+prep.2020.raw= lakes.filt.raw  %>%filter(year==2020) %>% 
+  mutate(group = case_when(
+    (doy>=162 &doy<=182) ~ 
+      "high discharge", #training imagery from high discharge period in 2020
+    (doy>235 & doy<=254)~
+      "low discharge" # training imagery from low discharge period in 2020
+  )) %>% drop_na() %>% 
+  dplyr::group_by(OBJECTID, year, group) %>%
+  dplyr::summarise(med_dw_m = median(dom_wv_mean),
+           med_R_m = median(Red_mean),
+           med_B_m = median(Blue_mean),
+           med_G_m = median(Green_mean),
+           med_Nir_m = median(Nir_mean),
+           med_Gb_m = median(GreenBlue_mean),
+           med_Ndssi_m = median(Ndssi_mean),
+           med_Nsmi_m = median(Nsmi_mean),
+           med_Nsmi_mod_m = median(Nsmi_mod_mean),
+           med_Ndti_m = median(Ndti_mean),
+           med_NirSwir1_m = median(NirSwir1_mean),
+           med_NirGreen_m = median(NirGreen_mean),
+           med_BlueNir_m = median(BlueNir_mean),
+          med_NirRedBlue_m = median(NirRedBlue_mean),
+           count=n()
+           ) %>% ungroup() %>% 
+  dplyr::filter(count>=2) %>% as_tibble()# require at least 2 or more observations in each period
+```
+
+## Enact random forest classification
+```{r}
+# Import training/testing data into the script, break our much larger classification scheme into 3 classes
+setwd(valFile.path)
+lake.class = st_read(valFileName , stringsAsFactors = F) %>% as_tibble() %>% 
+  rename(OBJECTID=ID) %>% 
+  group_by(OBJECTID) %>% mutate(row.num=row_number()) %>% filter(row.num==1) %>% 
+  dplyr::select(-row.num) %>% 
+  ungroup() %>% 
+  mutate(high.dis.class = case_when(
+   type == "g1" | type== "g7" | type== "g4" | type=="lowThenMedium" ~ 0,
+   type== "g3_5" | type=="mediumThenHigh" | type == "moderateBoth"~ 1,
+   type == "g2_5" | type == "g3"  | type =="g6" | type == "g2" | type=="g5" |type=="g2_add" ~ 2
+  ),
+  low.dis.class = case_when(
+    type == "g1" | type== "g7" | type== "g4" | type== "g3_5" | type == "g3"  | type =="g6"~ 0 ,
+    type == "g2_5" | type == "moderateBoth" | type=="lowThenMedium" ~ 1,
+    type == "g2" | type=="g5" |type=="g2_add" | type=="mediumThenHigh" ~ 2
+  )
+  ) %>% 
+  gather(Key, classes, -OBJECTID, -type, -geometry) %>% 
+  mutate(group = ifelse(Key=="high.dis.class", "high discharge", "low discharge")) %>% 
+  dplyr::select(-Key, -type, -geometry) %>% 
+  dplyr::filter(!is.na(classes) )  # Remove NA class values -- includes lakes whose class was obscured by clouds or bad imagery
+
+# join training/testing classes with reflectance data
+trainData.raw <- prep.2020.raw %>%   
+  left_join(lake.class, by=c("OBJECTID", "group")) %>% 
+  dplyr::select(-OBJECTID, -year, -count, -group) %>% drop_na() 
+
+
+# remove unimportant variables using the Boruta Method
+attach(trainData.raw)
+colnames(trainData.raw)
+set.seed(2000)
+## apply the boruta
+boruta.train.raw <- Boruta(classes~., data = trainData.raw,
+                       mcAdj = TRUE, pValue = 0.01,doTrace = 2,ntree = 50)
+## print the results of the boruta
+print(boruta.train.raw)
+boruta.train.raw$finalDecision
+## plot the results of the boruta
+plot(boruta.train.raw, colCode=c("lightgreen", "yellow", "red", "blue"),
+     cex.axis=.7, las=2, xlab="",sort=TRUE, main="") 
+## Get rid of tentative (yellow on the plot)
+boruta.bank.raw=TentativeRoughFix(boruta.train.raw)
+
+plot(boruta.bank.raw, colCode=c("lightgreen", "yellow", "red", "blue"),
+     cex.axis=.7, las=2, xlab="",sort=TRUE, main="") 
+
+##Select the variables to use during the classification
+important.cols.raw=getSelectedAttributes(boruta.bank.raw, withTentative = F) 
+bank_df.raw <- attStats(boruta.bank.raw)
+print(bank_df.raw) #visualize variable importance  
+bank_df.raw$variable = rownames(bank_df.raw)
+bank_df.raw=bank_df.raw %>% arrange(medianImp)
+bank_df.raw$variable = factor(bank_df.raw$variable, levels=bank_df.raw$variable)
+
+# keep Red band, and then remove things that are highly correlated to hit (pos or neg)
+cor.matrix.raw = cor(trainData.raw %>% select(-classes), method="spearman")
+rownm.raw = rownames(cor.matrix.raw)
+cor.tibble.raw = cor.matrix.raw %>% as_tibble()
+cor.tibble.raw$variable = rownm.raw
+remove.variables.raw = cor.tibble.raw %>% 
+  filter(abs(med_R_m) >=0.8) %>% filter(variable!="med_R_m")%>% select(med_R_m, variable)
+remove.variables.raw = remove.variables.raw$variable
+remove.variables.raw
+
+`%ni%` <- Negate(`%in%`)
+filtered.trainData.raw = subset(trainData.raw, 
+                                select = names(trainData.raw) %ni% 
+                                  remove.variables.raw)
+
+# look through the remaining variables and make sure there aren't any other correlations. If there are, remove them.
+filt.cor.raw = cor(filtered.trainData.raw %>% select(-classes), method="spearman")
+filt.index.raw = caret::findCorrelation(filt.cor.raw, cutoff=0.8)
+
+keep.names.raw = colnames(filtered.trainData.raw[,-filt.index.raw] %>% 
+                            select(-classes)) # these are the column names to keep
+
+# Prep data for random forest classification, 
+set.seed(123)
+## Join the reflectance and lake classification data,keep only important less correlated columns
+geci.val.raw =  prep.2020.raw %>% 
+  left_join(lake.class, by=c("OBJECTID", "group")) %>% 
+  dplyr::select(c("OBJECTID","classes", all_of(keep.names.raw))) %>% drop_na() %>% 
+  mutate(classes=as.factor(classes))
+## look at the data to make sure it is as expected
+skimr::skim(geci.val.raw)
+## split data into test and train
+set.seed(234)
+geci.split.raw = initial_split(geci.val.raw, strata=classes)
+geci.train.raw = training(geci.split.raw)
+geci.test.raw = testing(geci.split.raw)
+
+geci.train.raw %>% group_by(classes) %>% count()
+geci.test.raw %>% group_by(classes) %>% count()
+
+# Start random forest classification
+geci.rec.raw =recipe(classes ~., data=geci.train.raw) %>% 
+  update_role(OBJECTID, new_role = "OBJECTID")
+
+geci.pre.raw=prep(geci.rec.raw)
+geci.juiced.raw = juice(geci.pre.raw)
+geci.juiced.raw %>% count(classes)
+## Make model specifications & get ready to tune
+tune.spec.raw = rand_forest(
+  mtry=tune(), #when you are making leaves of the tree, how many do you sample at each split--all predictors or just a few
+  trees = 500,
+  min_n=tune()# How long do you keep splitting. How many data points have to be in a node before you stop splitting
+  ) %>% 
+  set_mode("classification") %>% set_engine("ranger") #ranger is just one way of doing random forest
+tune.wf.raw=workflow() %>% 
+  add_recipe(geci.rec.raw) %>% 
+  add_model(tune.spec.raw)
+## Train hyperparameters with 5-fold cross validation
+set.seed(345)
+geci.fold.raw  = vfold_cv(geci.train.raw, v=5, strata=classes)
+## tune parameters
+tune.res.raw=tune_grid(
+  tune.wf.raw,
+  resamples=geci.fold.raw,
+  grid=20
+)
+## take a look at parameters
+tune.res.raw %>% collect_metrics() #look at all the metrics
+tune.res.raw %>% select_best("roc_auc") #select best accuracy
+tune.res.raw %>% 
+  collect_metrics() %>% 
+  dplyr::filter(.metric=="roc_auc") %>% 
+  dplyr::select(mean, min_n, mtry) %>% 
+  pivot_longer(min_n:mtry,
+               values_to="value",
+               names_to="parameter") %>% 
+  ggplot(aes(value, mean, color=parameter))+
+  geom_point(show.legend="FALSE")+
+  facet_wrap(~parameter, scales="free_x")+theme_bw()+
+  theme(axis.text = element_text(size=12),
+        axis.title = element_text(size=14, face="bold"),
+        strip.text = element_text(size=14, face="bold"))+ylab("mean ROC AUC ")
+
+set.seed(456)
+
+## select the best option based on the ROC_AUC parameter
+best.acc.raw =select_best(tune.res.raw, "roc_auc") 
+final.rf.raw=finalize_model(
+  tune.res.raw,
+  best.acc.raw
+)
+## Check out variable importance for the model as a whole
+final.rf.raw %>% set_engine("ranger", importance="permutation") %>% 
+  fit(classes~.,
+      data = juice(geci.pre.raw) %>% dplyr::select(-OBJECTID)) %>% 
+  vip(geom="point")+theme_bw()
+# see how the model does on the testing data
+final.wf.raw = workflow() %>% 
+  add_recipe(geci.rec.raw) %>% 
+  add_model(final.rf.raw)
+final.res.raw=final.wf.raw %>% last_fit(geci.split.raw)
+final.res.raw %>% collect_metrics()
+final.res.raw %>% collect_predictions() 
+
+# Select the final model & apply it to the training/testing dataset
+fitted.wf.rf.raw= pluck(final.res.raw, 6)[[1]]
+train.ids.raw = geci.train.raw$OBJECTID
+test.ids.raw = geci.test.raw$OBJECTID
+final.pred.cm.raw = cbind(predict(fitted.wf.rf.raw, geci.val.raw), geci.val.raw) %>% as_tibble() %>% 
+  dplyr::select(OBJECTID, .pred_class, classes)%>% rename(.obs_class = classes) %>% 
+  mutate(split=case_when(
+    OBJECTID %in% train.ids.raw~"train", 
+    OBJECTID %in% test.ids.raw~"test"))
+
+## Save the training/test classifications
+setwd(int.wd)
+write_rds(final.pred.cm.raw, paste0("predictions_traintest_raw_",todayDate, ".Rdata"))
+final.pred.cm=read_rds(paste0("predictions_traintest_raw_",todayDate, ".Rdata"))
+## Plot a confusion matrix
+### Just testing split
+table.test.raw=confusionMatrix(final.pred.cm.raw[final.pred.cm.raw$split=="test",]$.pred_class,
+                      final.pred.cm.raw[final.pred.cm.raw$split=="test",]$.obs_class)
+### All training and testing
+table.all.raw=confusionMatrix(final.pred.cm.raw$.pred_class,
+                      final.pred.cm.raw$.obs_class)
+
+table.test.raw
+table.all.raw
+
+# Calculate Gwets AC1 (alternative to kappa statistic) https://cran.r-project.org/web/packages/irrCAC/vignettes/weighting.html
+#relevant paper https://support.sas.com/resources/papers/proceedings/proceedings/forum2007/186-2007.pdf
+#install.packages("irrCAC")
+library(irrCAC)
+
+test.cm.raw  = table.test.raw$table
+q.raw = nrow(test.cm.raw)
+gwet.ac1.table(test.cm.raw, weights = linear.weights(1:q.raw))
+
+```
+
+
+## Apply model to all years of data
+```{r}
+setwd(int.wd)
+# select all data, rename variables so that they match the model
+prep.all.raw = lakes.filt.raw  %>% 
+  rename(med_dw_m = dom_wv_mean,
+           med_R_m = Red_mean,
+           med_B_m = Blue_mean,
+           med_G_m = Green_mean,
+           med_Nir_m = Nir_mean,
+           med_Gb_m = GreenBlue_mean,
+           med_Ndssi_m = Ndssi_mean,
+           med_Nsmi_m = Nsmi_mean,
+           med_Nsmi_mod_m = Nsmi_mod_mean,
+           med_Ndti_m = Ndti_mean,
+           med_NirSwir1_m = NirSwir1_mean,
+           med_NirGreen_m = NirGreen_mean,
+           med_BlueNir_m = BlueNir_mean,
+          med_NirRedBlue_m = NirRedBlue_mean) %>%
+  dplyr::select(c("OBJECTID","year","month","date","doy" ,all_of(keep.names.raw))) %>% drop_na() %>% 
+  as_tibble()
+
+
+# Apply the classification and convert resulting dataframe in to a spatial object
+set.seed(500)
+all.classified.raw = cbind(predict(fitted.wf.rf.raw, prep.all.raw), prep.all.raw) %>% as_tibble() %>% 
+  mutate(doy=yday(date)) %>% 
+  left_join(lakes.sf %>% dplyr::select(-count), by="OBJECTID") %>% arrange(year, month)
+
+
+# import shoreline and buffer it by 5km, then remove lakes in that buffer, and filter them out of the results
+setwd("C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/shapeFiles")
+shoreline = st_read("MackenzieShorelineUTM8N.shp")
+shoreline.buffer = st_buffer(shoreline, dist = 10000) # distance is in the units of the projection (m)
+intersect.list = st_intersects(lakes.sf %>% st_transform("EPSG:32608"), shoreline.buffer)
+intersect.lakes =lakes.sf[lengths(intersect.list)>0,]
+
+all.classified.filter.raw = subset(all.classified.raw, !(OBJECTID %in% intersect.lakes$OBJECTID))
+
+setwd(int.wd)
+write_rds(all.classified.filter.raw,paste0("final.class_raw_", todayDate, ".Rdata"))
+```
+
+# Compare raw and corrected reflectance classifications
+```{r}
+
+corrected.dt = all.classified.filter %>% 
+  select(.pred_class, OBJECTID, date, month, year) %>% 
+  rename(.pred_class.c = .pred_class) %>% 
+  mutate(.pred_class.c = as.numeric(as.character(.pred_class.c))) %>% lazy_dt()
+
+raw.dt = all.classified.filter.raw %>% 
+  select(.pred_class, OBJECTID, date) %>% 
+  rename(.pred_class.r = .pred_class) %>% 
+  mutate(.pred_class.r = as.numeric(as.character(.pred_class.r))) %>% lazy_dt()
+
+join.dt = corrected.dt %>% 
+  left_join(raw.dt, by=c("OBJECTID", "date")) %>% 
+  mutate(class.group = case_when(
+    .pred_class.r == .pred_class.c ~ "same class",
+    .pred_class.r > .pred_class.c ~ "raw class > calibrated class",
+    .pred_class.r < .pred_class.c ~ "raw class < calibrated class"
+  ),
+  class.dif= .pred_class.r - .pred_class.c )
+
+join.dt.count = join.dt %>% group_by(class.dif) %>% count() %>% as_tibble() 
+join.dt.count = sum(join.dt.count$n)
+join.dt %>% group_by(class.dif) %>% count() %>% 
+  mutate(pct = round(n/join.dt.count, 2)) %>% select(class.dif, pct)
+
+join.dt.month = join.dt %>% group_by(month) %>% count() %>% rename(total.obs = n)
+join.dt %>% group_by(class.dif, month) %>% count() %>% 
+  left_join(join.dt.month, by="month") %>% 
+  mutate(pct = round(n/total.obs, 2)) %>% 
+  as_tibble() %>% select(-total.obs, -n) %>% 
+  spread(month, pct)
+
+
+join.dt.decade = join.dt %>% 
+  mutate(decade =case_when(
+    year<= 1989 ~ "1980s",
+    year >= 1990 & year <=1999 ~ "1990s",
+    year >=2000 & year <=2009 ~ "2000s",
+    year >=2010 & year <= 2019 ~ "2010s",
+    year >=2020 & year <=2029 ~ "2020s"
+  )) %>% 
+  group_by(decade) %>% count() %>% rename(total.obs = n)
+join.dt %>% 
+  mutate(decade =case_when(
+    year<= 1989 ~ "1980s",
+    year >= 1990 & year <=1999 ~ "1990s",
+    year >=2000 & year <=2009 ~ "2000s",
+    year >=2010 & year <= 2019 ~ "2010s",
+    year >=2020 & year <=2029 ~ "2020s"
+  )) %>%  group_by(class.dif, decade) %>% count() %>% 
+  left_join(join.dt.decade, by="decade") %>% 
+  mutate(pct = round(n/total.obs, 2)) %>% 
+  as_tibble() %>% select(-total.obs, -n) %>% 
+  spread(decade, pct)
+
+
+
+```
+
