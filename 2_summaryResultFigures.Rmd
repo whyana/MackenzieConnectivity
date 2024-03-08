@@ -48,27 +48,19 @@ library(vip)
 # dates for version control
 todayDate  = "20230324" # the first data join phase
 
-# Names of files and folders for reflectance data
 
-import.sword = "na_sword_reaches_hb82_v14.shp"
-
-# intermediate working directory
-int.wd="C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/intermediaryDownloads"
-refl.import = 'srCorrected_mackLakes_202303138.feather'
-
-#Name of file and folder for lake shapefiles & island polygon shapefiles
+#Name of file and folder for lake shapefiles & island polygon shapefiles & river reach shapefiles
 shapeFiles.filePath = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/shapeFiles"
 lakes.shapeFile = "mackenzieGoodLakes.shp"
-islands.shapeFile = "vectorIslandArea2.shp"
 import.sword = "na_sword_reaches_hb82_v14.shp"
 setwd(shapeFiles.filePath)
 lakes.sf = st_read(lakes.shapeFile)
-islands.sf=st_read(islands.shapeFile)
-# Image export folder
-images.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/images"
-# Piliouras shapefile folder
+# Piliouras delta islands shapefile folder
 pil.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/PiliourasAndRowland/"
 pil.file = "MackenzieDeltaIslands.shp"
+
+# Image export folder
+images.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/images"
 
 ```
 
@@ -99,7 +91,7 @@ getmode <- function(v) {
 ```
 
 # Plot a summary of connectivity through time.
-## Figure 5 and Supplemental Figure 5
+## Figure 4 and Supplemental Figure 6
 ```{r}
 # Prep data for plotting
 plot.prep = all.classified.filter %>% lazy_dt() %>% #convert to lazy DT for faster processing
@@ -318,7 +310,7 @@ ggplot(data=plot.uncert.prep)+
   guides(fill=guide_colourbar(direction="vertical",  title.position = "top", title.hjust = 0.5))+facet_wrap(~monthWord, nrow=1)
 
 setwd(images.wd)
-ggsave(paste0(todayDate, "_MonthlyUncertMap.png"), height=3, width=8, units="in")
+ggsave(paste0(todayDate, "_MonthlyUncertMap.png"), height=3, width=8, units="in", bg="white")
 ```
 
 # plot study area figure
@@ -401,7 +393,7 @@ ggsave(paste0("20230423","_studyArea.pdf"), device="pdf", width=4, height=5, uni
 ```
 
 # Summarize connected lake area during the month after peak discharge at Arctic Red River
-## Figure 6
+## Figure 5
 ```{r}
 # Get yearly timing of peak flow at Arctic Red River
 complete.flows = hy_daily_flows(
@@ -503,19 +495,32 @@ for (z in 1:length(thresh)){
 }
 
 # Plot connectivity pct area using a class 1 threshold
-all.df %>% 
-  ggplot(aes(x=thresh, y=pct.area, color = as.factor(timegroup),
-             group=timegroup, 
-             shape =
-               as.factor(timegroup)))+geom_line()+geom_point()+
-  theme_bw()+ylab("percent of lake area")+
+all.df = all.df %>% 
+  mutate(timegroup2= case_when(
+    timegroup==0 ~ "0 - 27",
+    timegroup==28 ~ "28 - 55",
+    timegroup==56 ~"56 - 83",
+    timegroup==84 ~ "84 - 111",
+    timegroup==112 ~ "112 - 139"
+  )) 
+all.df$timegroup2 = factor(all.df$timegroup2, levels = c("0 - 27", "28 - 55", "56 - 83", "84 - 111", "112 - 139"))
+
+all.df%>% 
+  ggplot(aes(x=thresh, y=pct.area, color = as.factor(timegroup2),
+             group=timegroup2))+geom_line()+geom_point()+
+  theme_bw()+ylab("probability of\nexceeding connectivity threshold")+
   xlab("mean connectivity class threshold")+
   theme(axis.text = element_text(size=12),
-        axis.title = element_text(size=12, face="bold"))+
-  scale_x_continuous(breaks=c(0,0.5, 1,1.5, 2))
+        axis.title = element_text(size=12, face="bold"),
+        legend.title = element_text(size=12, face="bold"),
+        legend.text=element_text(size=12))+
+  scale_x_continuous(breaks=c(0,0.5, 1,1.5, 2))+
+  scale_color_manual(values=c("#130112", "#A21675", "#E74BB5", "#F093D3", "#96788D"))+
+  labs(color="Days after\npeak discharge")
 
-
-# plot variability of flow
+setwd(images.wd)
+ggsave(paste0(todayDate, "probabilityOfExceed.pdf"), width=6, height=4, units = "in")
+# plot variability of flow - NOT IN PAPER
 ## calculate recurrance intervals
 RI.df = complete.flows %>% 
   group_by(year) %>% 
