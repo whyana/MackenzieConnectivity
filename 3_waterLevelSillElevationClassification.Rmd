@@ -59,11 +59,11 @@ int.wd="C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Con
 #Name of file and folder for lake shapefiles & island polygon shapefiles
 shapeFiles.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/shapeFiles"
 lakes.shapeFile = "mackenzieGoodLakes.shp"
-islands.shapeFile = "vectorIslandArea2.shp"
-import.sword = "na_sword_reaches_hb82_v14.shp"
 setwd(shapeFiles.filePath)
 lakes.sf = st_read(lakes.shapeFile)
-islands.sf=st_read(islands.shapeFile)
+import.sword = "na_sword_reaches_hb82_v14.shp" # River centerlines
+
+
 
 images.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/images"
 
@@ -75,7 +75,7 @@ val.filename = "MarshHey1998_prj.shp"
 wsc.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/dischargeData"
 
 # ArcticGRO sediment & level data at Arctic Red River 
-sed.wd="C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data"
+sed.wd="C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data"
 sed.file= "ArcticGROWaterQuality.csv"
 ```
 
@@ -301,7 +301,7 @@ for (y in 1:nrow(nest.sill)){
                            pval)
   combo.all = rbind.data.frame(combo.all, combo)
 }
-
+# Export the intermediary step to save time for later code runs
 setwd(int.wd)
 write_feather(combo.all, paste0("raw_sillElevation_material.feather"))
 combo.all = read_feather("raw_sillElevation_material.feather")
@@ -378,7 +378,7 @@ sill.compare = combo.prep %>%
                               fin.min ==-999, NA, 
                             (fin.max+fin.min)/2)) 
 
-
+# Export the final sill elevation dataset!
 setwd(int.wd)
 write_feather(sill.compare,paste0(todayDate, "sillElevation_c.feather"))
 #sill.compare = read_feather(paste0(todayDate, "sillElevation_c.feather"))
@@ -386,7 +386,7 @@ write_feather(sill.compare,paste0(todayDate, "sillElevation_c.feather"))
 ```
 
 # Plot sill elevation figures
-## Figure 7
+## Figure 6
 ```{r}
 setwd(int.wd)
 sill.compare = read_feather(paste0(todayDate, "sillElevation_c.feather"))
@@ -458,10 +458,54 @@ p3.all=ggplot()+
    guides(fill=guide_legend(nrow=4,byrow=TRUE))+ggtitle("c.")
 
 
+# Map all those with low uncertainty
+ggplot()+
+  geom_sf(data=sill.sf %>% filter(!is.na(fin.sill)) %>% filter(fin.range/2 <=0.5),
+          fill="black", color=NA)+
+  theme_void()+
+  geom_sf(data=mack.basin.large, color="grey70", size=0.5)+
+ # geom_sf(data=station.locations.sill, color="black",size=2, shape=17)+
+  theme(
+        panel.background = element_rect(fill=NA, color="black", linewidth = 1),
+        legend.position="none",
+        legend.text = element_text(size=12),
+        legend.background = element_blank(),
+        legend.title = element_text(size=12, face="bold"))+
+  labs(fill="median\nfunctional\nconnectivity\nelevation\nthreshold (m)")+
+   guides(fill = guide_colorbar(barwidth = 8, barheight = 0.5))
+setwd(images.wd)
+ggsave("lowuncert_sill.png", width = 4, height = 8.5, units="in")
+
+
 p1.all+p2.all+p3.all
 setwd(images.wd)
 ggsave(paste0("20231018","_sills_ALL.png"), width=10.5, height=8.5, units = "in")
 ggsave(paste0("20231018","_sills_ALL.pdf"), width=10.5, height=8.5, units = "in")
+
+# Plot uncertainty vs elevation
+
+sill.sf %>% select(OBJECTID, fin.sill, fin.range) %>% 
+  mutate(fin.uncert = fin.range/2) %>% as_tibble() %>% select(-geometry) %>% 
+  filter(!is.na(fin.sill) & !is.na(fin.uncert)) %>% 
+  ggplot()+
+    geom_hex(aes(x=fin.sill, y=fin.uncert), binwidth = c(0.1, 0.1))+
+    scale_fill_viridis_c(limits=c(0, 100), oob=squish,
+                         breaks = c(0,25,50, 75, 100),
+                         labels =c("0", "25", "50","75", ">100"))+
+  theme_bw()+
+  theme(
+    axis.title = element_text(size=12, face="bold"),
+    axis.text = element_text(size=12),
+    legend.title = element_text(size=12, face="bold"),
+    legend.text = element_text(size=12)
+  )+
+  xlab("median functional connectivity\nelevation (m)")+
+  ylab("uncertainty in functional\nconnectivity elevation threshold (m)")+
+  labs(fill="number of\nlakes")+
+  xlim(-0.25, 4)+ylim(-0.25, 4)+
+  geom_abline(slope=1, intercept=0)+
+  geom_text(aes(x=3, y=3.2, label="1:1"), angle=45)
+
 
 # table with a summary of lakes
 sill.compare %>% lazy_dt() %>% 
@@ -484,7 +528,7 @@ sill.compare %>% lazy_dt() %>%
 
 
 # Comparison of our sill elevations to Marsh & Hey 1988
-## Figure 8 & Figure 9
+## Figure 7 & Figure 8
 ```{r}
 # Import the sill elevations calculated above
 setwd(int.wd)
@@ -519,6 +563,7 @@ plot1 = combo.df %>%  ggplot(aes(x=fin.sill, y=SmmrSill))+
 plot1
 setwd(images.wd)
 ggsave("MarshHeyAll_versusPlot.png", width=4, height=4, units = "in")
+ggsave("MarshHeyAll_versusPlot.pdf", width=4, height=4, units = "in")
 
 
 # calculate whether or not the sills overlap for always 0 and alway 2 functional connectivity lakes
@@ -541,7 +586,7 @@ combo.prep$group_name =
              "always high functional connectivity (class 2)",
              "no discharge relationship"))
 
-# Figure 9
+# Figure 8
 plot2 = combo.prep %>%  
   filter(is.na(fin.sill) & class!="no discharge relationship") %>%
   ggplot(aes(x=str_wrap(group_name, 12), 
@@ -552,7 +597,7 @@ plot2 = combo.prep %>%
 plot2
 setwd(images.wd)
 ggsave("MarshHeyAll_noSillElev.png", width=3, height=3, units = "in")
-
+ggsave("MarshHeyAll_noSillElev.pdf", width=3, height=3, units = "in")
 # Plot summary table
 combo.df %>% as_tibble() %>% select(-geometry) %>% mutate(class=case_when(
   is.na(fin.sill) ~ class,
