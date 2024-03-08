@@ -17,7 +17,7 @@ Data is unpublished
 5_resuspension: Analyzes the occurrence of resuspension
 
 ## Inputs needed for each script can be found here organized by script:
-https://zenodo.org/records/10056346
+https://doi.org/10.5281/zenodo.10798879
 
 ## Google Earth Engine Script run prior to R analysis can be found here
 Primary reflectance export code: https://code.earthengine.google.com/f6e00bc218f99556fba99815f7961fa7
