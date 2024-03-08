@@ -71,7 +71,7 @@ crs.plot = "+proj=tcea +lon_0=-134.3847656 +datum=WGS84 +units=m +no_defs"
 
 # Analyze for resuspension!
 ```{r}
-# Figure out which island each lake is within and join accordingly
+# Figure out which island each lake is contained within and join accordingly
 island.lakes = lakes.sf %>% st_transform(crs.plot) %>% 
   select(OBJECTID, geometry) %>% 
   st_join(islands.sf %>% st_transform(crs.plot) %>% 
