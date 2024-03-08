@@ -53,7 +53,7 @@ import.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/R
 
 # intermediate working directory
 int.wd="C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/intermediaryDownloads"
-refl.import = 'srCorrected_mackLakes_202303138.feather'
+
 
 #Name of file and folder for lake shapefiles & island polygon shapefiles
 shapeFiles.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/shapeFiles"
@@ -159,13 +159,12 @@ for (i in 1:nrow(nested.data)){
     row.combo=rbind.data.frame(row.combo, col.combo)
   }
 }
-
+# Export raw trend data so that you have fast access to it if you need to rerun the script
 setwd(int.wd)
 write_feather(row.combo, "raw_trend.feather")
+#row.combo = read_feather("raw_trend.feather")
 
-row.combo = read_feather("raw_trend.feather")
-
-## Format trend data results
+## Format trend data results and export the final trend data
 trend.data=row.combo %>% as_tibble()%>% 
   mutate(trend = case_when(
     tau>0 & pval < 0.05 ~ "increasing connectivity trend",
