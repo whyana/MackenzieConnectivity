@@ -1,8 +1,4 @@
 # MackenzieConnectivity
-
-** For use during the review process for WRR ** 
-Data is unpublished
-
 ## Folder contains 6 R markdown scripts:
 0_surfaceReflectanceCorrection: Corrects landsat 5 and 8 reflectance to landsat 7
 
