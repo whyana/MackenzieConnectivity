@@ -48,26 +48,26 @@ library(vip)
 # dates for version control
 todayDate  = "20230324" # the first data join phase
 
+# Set folder for all input data
+int.wd = "~/WRR Submission 2 Data/Script 2"
 
-#Name of file and folder for lake shapefiles & island polygon shapefiles & river reach shapefiles
-shapeFiles.filePath = "C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/shapeFiles"
+#Name of file for lake shapefiles & island polygon shapefiles & river reach shapefiles
 lakes.shapeFile = "mackenzieGoodLakes.shp"
 import.sword = "na_sword_reaches_hb82_v14.shp"
-setwd(shapeFiles.filePath)
+setwd(int.wd)
 lakes.sf = st_read(lakes.shapeFile)
-# Piliouras delta islands shapefile folder
-pil.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/PiliourasAndRowland/"
+# Piliouras delta islands shapefile
 pil.file = "MackenzieDeltaIslands.shp"
 
 # Image export folder
-images.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/images"
+images.wd = "~/images"
 
 ```
 
 # Import river centerlines and set the projection for all future plots, import classifications
 ```{r}
 crs.plot = "+proj=tcea +lon_0=-134.3847656 +datum=WGS84 +units=m +no_defs"
-setwd(shapeFiles.filePath)
+setwd(int.wd)
 study.area.large=cbind.data.frame(lon=c(-136.80, -136.80, -133.47, -133.47), 
                  lat=c(67.25, 69.55, 69.55, 67.46)) %>% 
   st_as_sf(coords=c("lon", "lat")) %>% st_set_crs(4326) %>% st_bbox() %>% 
@@ -186,7 +186,7 @@ ggsave(paste0(todayDate, "lakeMonthlySummary.png"), width=8, height = 6, units="
 
 
 # Plot summary statistics of connectivity through time in islands
-setwd(pil.wd)
+setwd(int.wd)
 mack.islands = st_read(pil.file) %>%
   dplyr::select(fid, geometry) %>%
   st_transform(crs.plot)
@@ -350,7 +350,7 @@ largescale.map = ggplot()+
 setwd(int.wd)
 require(rnaturalearth)
 world_ne <- ne_countries(scale = "large", returnclass = "sf")
-setwd("C:/Users/whyana/OneDrive - University of North Carolina at Chapel Hill/DocumentsLaptop/001_ Graduate School/Research/Connectivity/Mackenzie/Data/shapeFiles/Coastline")
+setwd(int.wd)
 world_noaa = st_read("GSHHS_h_L1.shp")
 mack.delta <- world_noaa %>% 
   st_transform(crs.plot) %>% st_crop(xmin = -150941.35, ymin = 7486525.66,
