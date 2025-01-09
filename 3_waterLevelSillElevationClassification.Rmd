@@ -48,41 +48,34 @@ library(vip)
 # dates for version control
 todayDate  = "20230324" # the first data join phase
 
-# Names of files and folders for reflectance data
-import.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/GEE Downloads"
-
-
 # intermediate working directory
-int.wd="C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/intermediaryDownloads"
+int.wd="~/WRR Submission 2 Data/Script 3"
 
 
-#Name of file and folder for lake shapefiles & island polygon shapefiles
-shapeFiles.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/shapeFiles"
+#Name of file for lake shapefiles & island polygon shapefiles
 lakes.shapeFile = "mackenzieGoodLakes.shp"
-setwd(shapeFiles.filePath)
+setwd(int.wd)
 lakes.sf = st_read(lakes.shapeFile)
 import.sword = "na_sword_reaches_hb82_v14.shp" # River centerlines
 
 
-
-images.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/images"
+# Working directory for image exports
+images.wd = "~/images"
 
 # import Marsh & Hey Validation
-val.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/MarshHey1988"
 val.filename = "MarshHey1998_prj.shp"
 
-# River waterlevel data
-wsc.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/dischargeData"
+# River waterlevel data working directory
+wsc.wd = "~/WRR Submission 2 Data/Script 3/waterLevelData"
 
 # ArcticGRO sediment & level data at Arctic Red River 
-sed.wd="C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data"
 sed.file= "ArcticGROWaterQuality.csv"
 ```
 
 # Import river centerlines and set the projection for all future plots, import classifications
 ```{r}
 crs.plot = "+proj=tcea +lon_0=-134.3847656 +datum=WGS84 +units=m +no_defs"
-setwd(shapeFiles.filePath)
+setwd(int.wd)
 study.area.large=cbind.data.frame(lon=c(-136.80, -136.80, -133.47, -133.47), 
                  lat=c(67.25, 69.55, 69.55, 67.46)) %>% 
   st_as_sf(coords=c("lon", "lat")) %>% st_set_crs(4326) %>% st_bbox() %>% st_as_sfc() %>% 
@@ -376,12 +369,11 @@ sill.compare = combo.prep %>%
                             fin.max-fin.min),
        fin.sill = ifelse(fin.max == -999 | 
                               fin.min ==-999, NA, 
-                            (fin.max+fin.min)/2)) 
+                            (fin.max+fin.min)/2)) %>% ungroup()
 
 # Export the final sill elevation dataset!
 setwd(int.wd)
 write_feather(sill.compare,paste0(todayDate, "sillElevation_c.feather"))
-#sill.compare = read_feather(paste0(todayDate, "sillElevation_c.feather"))
 
 ```
 
@@ -483,7 +475,6 @@ ggsave(paste0("20231018","_sills_ALL.png"), width=10.5, height=8.5, units = "in"
 ggsave(paste0("20231018","_sills_ALL.pdf"), width=10.5, height=8.5, units = "in")
 
 # Plot uncertainty vs elevation
-
 sill.sf %>% select(OBJECTID, fin.sill, fin.range) %>% 
   mutate(fin.uncert = fin.range/2) %>% as_tibble() %>% select(-geometry) %>% 
   filter(!is.na(fin.sill) & !is.na(fin.uncert)) %>% 
@@ -535,7 +526,6 @@ setwd(int.wd)
 sill.compare = read_feather(paste0(todayDate, "sillElevation_c.feather"))
 
 # import the validation and join it to the same object ids as used above
-setwd(val.wd)
 val.raw = read_sf(val.filename) %>% st_transform(crs.plot)
 lakes.prj = lakes.sf %>% st_transform(crs.plot)
 
@@ -706,117 +696,5 @@ read_feather(paste0(todayDate, "avgConnectionTime.feather")) %>%
     above.min>=61 ~ "above 61 days"
   )) %>% group_by(group.min) %>% count()
 
-```
-
-
-# Plot gif of results w/ discharge
-# not in paper
-```{r}
-setwd("C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/images/GIF_20230512")
-prep.gif.data = filt.obs %>%  # all lakes during 4 weeks after freshet
-  left_join(lakes.sf, by="OBJECTID") %>% 
-  st_as_sf() %>% st_transform(crs = crs.plot) %>% 
-  group_by(year) %>% nest() %>% ungroup()
-
-dis.location = hy_stations(station_number = "10LC014") %>% 
-  st_as_sf(coords=c("LONGITUDE", "LATITUDE")) %>% 
-  st_set_crs(4326) %>% st_transform(crs.plot)
-dis.filt = complete.flows %>% filter(STATION_NUMBER=="10LC014")
-
-study.area.gif=cbind.data.frame(lon=c(-137.3, -137.3, -133.2, -133.2), 
-                 lat=c(67.25, 69.64, 69.64, 67.25)) %>% 
-  st_as_sf(coords=c("lon", "lat")) %>% st_set_crs(4326) %>% st_bbox() %>% st_as_sfc() %>% 
-  st_transform(crs = crs.plot)
-
-### Loop through each year
-for (z in 1: length(prep.gif.data$year)){
-  dat = prep.gif.data$data[[z]] 
-  year.main = prep.gif.data$year[[z]]
-  
-  #### Create plot 1 (map of June connectivity)
-  scale = scale_fill_gradientn(colours = c("#88ccee","#44aa99","#117733"), limits=c(0,2))
-  p1 = ggplot(data=dat)+
-   geom_sf(aes(fill=mean.con), color=NA)+
-    theme_bw()+scale+
-    annotation_scale(text_cex = 1.2)+
-    geom_sf(data=mack.basin.large, color="grey65")+
-    geom_sf(data=study.area.gif , color=NA, fill=NA)+
-    #geom_sf(data=dis.location,color="black", size=5)+
-    scale_colour_manual(guide="none", values=c("#000000", "#ABA9A9"))+
-    ggtitle(year.main)+
-    theme(axis.text.x = element_blank(),
-          axis.text.y = element_blank(),
-          plot.title=element_text(size=18, face="bold", hjust=0.5),
-         # legend.title = element_text(size=16, face="bold"),
-          legend.text=element_text(size=16, face="bold"),
-          legend.position="bottom", legend.direction="horizontal",
-          legend.key.size=unit(1, "cm"),
-          axis.ticks = element_blank(),
-          legend.title=element_blank(),
-         legend.box.spacing = unit(0, "pt"),
-         legend.margin=margin(0,0,0,0))+labs(fill="Class")+
-    guides(fill=guide_legend(label.position="top",label.vjust = -8, title.vjust = 0.2))
-  
-
-  #### Save the gif to your file
-  ggsave(plot=p1,filename= paste0("year", year.main, ".png") ,width=14, height=9.5, units = "in") 
-}  
-
-
-### List all the files in the gif and combine them into a stacked image
-
-files=list.files(pattern="*.png")
-images <- map(files, image_read)
-images <- image_join(images)
-### Animate the stacked image
-gif = image_animate(images, fps = 1, dispose = "previous")
-
-## save as a gif
-setwd(images.wd)
-
-image_write(gif, paste0("gif_", "20230512", ".gif"))
-
-
-```
-
-# Compare sediment to water level -- what is the relationship?
-## not in paper, but useful for presentations or reviewer's comments
-```{r}
-# impart Mackenzie Sediment / Water Quality data from Arctic Red River
-setwd(sed.wd)
-
-wq.df = read.csv(sed.file) %>% 
-  as_tibble() %>% select(Date, Discharge, DOC, TSS) %>% 
-  mutate(Date = as_date(Date))
-
-# Filter water level data just to Arctic Red River
-rr.water.level = level_data %>% filter(ID == "10LC014") %>% 
-  mutate(Date = as_date(Date))
-
-# join discharge and water quality data
-wl.wq = wq.df %>% left_join(rr.water.level, by="Date") %>% 
-  filter(!is.na(TSS) & !is.na(Value))
-
-ggplot(wl.wq)+
-  geom_point(aes(x=Value, y=TSS, color=as.factor(month)))+
-  xlab("Water Level (m) at Arctic Red River")+ylab("TSS (mg/L) at Arctic Red River")+theme_classic()+labs(color="Month")+
-  theme(axis.text = element_text(size=14),
-        axis.title = element_text(size=14, face="bold"),
-        legend.text = element_text(size=14),
-        legend.title = element_text(size=14, face="bold"),
-        panel.background = element_rect(fill='transparent'),
-        #transparent panel bg
-    plot.background = element_rect(fill='transparent', color=NA),
-    #transparent plot bg
-    panel.grid.major = element_blank(), #remove major gridlines
-    panel.grid.minor = element_blank(), #remove minor gridlines
-    legend.background = element_rect(fill='transparent'), 
-    #transparent legend bg
-    legend.box.background = element_rect(fill='transparent', color=NA)) 
-#transparent legend panel)
-setwd(images.wd)
-ggsave("20230508_TSS_vs_waterLevel.png", bg="transparent",
-       width = 6, height = 4, units="in")
-# TLDR: Above the delta, water level and TSS are highly correlated. 
 ```
 
