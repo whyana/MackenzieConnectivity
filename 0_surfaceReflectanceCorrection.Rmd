@@ -101,8 +101,12 @@ correctionPlot <- function(band, sat, dataPre, dataPost){
 
 # code adapted from https://github.com/GlobalHydrologyLab/LakeReflectanceRepo/blob/master/01_LakeExtractor.Rmd 
 ```{r} 
+# set working directory for file export
+input.wd = "~/WRR Submission 2 Data/Script 0"
+output.wd = "~/WRR Submission 2 Data/Script 1"
+images.wd = "~/images"
 # 1. import lake & channel reflectance (only keep mean reflectance, we don't need the 10th & 90th% reflectance--using those didn't improve results)
-setwd("C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/GEE Downloads")
+setwd(input.wd)
 
 all.lakes = fread('MackenzieLakeExport_20230323_2.csv')  %>% 
   select(!matches("p10") & !matches("p90"))
@@ -301,7 +305,7 @@ srCor <- data.join %>%
 rm(l5corr, l8corr)
 srCor <- as.data.table(srCor)[,dom_wv_mean := chroma(Red_mean, Green_mean, Blue_mean)]
 
-setwd("C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/intermediaryDownloads")
+setwd(output.wd)
 write_feather(srCor, 'srCorrected_mackLakes_20230324.feather')
 rm(all.lakes) 
 gc()
@@ -341,7 +345,7 @@ srCor.chan <- data.join.chan %>%
   bind_rows(l5corr.chan) %>%
   bind_rows(l8corr.chan) 
 rm(l5corr.chan, l8corr.chan)
-setwd("C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/intermediaryDownloads")
+setwd(output.wd)
 write_feather(srCor.chan, 'srCorrected_mackChans_20230424.feather')
 
 
@@ -349,7 +353,7 @@ write_feather(srCor.chan, 'srCorrected_mackChans_20230424.feather')
 
 # correction plotted results for lakes  - Supplemental Figure 3
 ```{r}
-setwd("C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/intermediaryDownloads")
+setwd(output.wd)
 srCor=read_feather('srCorrected_mackLakes_20230324.feather')
 srCor <- as.data.table(srCor)
 refCompPre <- as.data.table(data.join)
@@ -374,7 +378,7 @@ g11 <- gridExtra::grid.arrange(g1, bottom = 'Landsat 7 Surface Reflectance', lef
 g22 <- gridExtra::grid.arrange(g2, bottom = 'Landsat 7 Surface Reflectance', left = 'Landsat 8 Surface Reflectance')
 g <- gridExtra::grid.arrange(g11,g22, nrow = 2)       
 
-setwd("C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/images")
+setwd(images.wd)
 ggsave('srCorrections_20230423.pdf', plot = g, width = 8, height = 10, units = 'in')
 rm(g1, g2, g11, g22, g)
 ```
