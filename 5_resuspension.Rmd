@@ -41,27 +41,25 @@ library(dtplyr)
 todayDate  = "20230324" # the first data join phase
 
 # Names of files and folders for reflectance data
-import.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/GEE Downloads"
+import.filePath = "~/WRR Submission 2 Data/Script 5"
 
 
 # intermediate working directory
-int.wd="C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/intermediaryDownloads"
-refl.import = read_feather('srCorrected_mackLakes_202303138.feather')
+setwd(import.filePath)
+refl.import = read_feather('srCorrected_mackLakes_20230324.feather')
 refl.import.chan = read_feather('srCorrected_mackChans_20230424.feather')
 
-#Name of file and folder for lake shapefiles & island polygon shapefiles
-shapeFiles.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/shapeFiles"
+#Name of file for lake shapefiles & island polygon shapefiles
 lakes.shapeFile = "mackenzieGoodLakes.shp"
 islands.shapeFile = "vectorIslandArea2.shp"
 import.sword = "na_sword_reaches_hb82_v14.shp"
-setwd(shapeFiles.filePath)
 lakes.sf = st_read(lakes.shapeFile)
 islands.sf=st_read(islands.shapeFile)
 
-images.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/images"
+images.wd = "~/images"
 
 # import results
-setwd(int.wd)
+setwd(import.filePath)
 all.classified.filter = read_feather(paste0("final.class_", todayDate, ".feather")) 
 
 # Set crs for plots
@@ -114,8 +112,8 @@ lake.chan.export = lake.chan.class %>% filter(Nir_ratio>1.3 & .pred_class==2) %>
     left_join(lakes.sf, by="OBJECTID") %>% 
   st_as_sf()
 
-setwd(int.wd)
-st_write(lake.chan.export, "Nir1_3_class2.shp")
+setwd(import.filePath)
+st_write(lake.chan.export, "Nir1_3_class2.shp", append=F)
 
 # Import the data into GEE and complete the analysis. Link to GEE script here: https://code.earthengine.google.com/b2a63a5cd472a802a08c1a5d794fbf85
 
