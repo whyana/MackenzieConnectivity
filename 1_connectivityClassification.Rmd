@@ -51,22 +51,25 @@ library(vip)
 # dates for version control
 todayDate  = "20230324" # the first data join phase
 
-# intermediate working directory
-int.wd="C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/intermediaryDownloads"
+# intermediate working directories
+int.wd="~/WRR Submission 2 Data/Script 1"
 refl.import = 'srCorrected_mackLakes_20230324.feather'
 
-#Name of file and folder for lake shapefiles & island polygon shapefiles
-shapeFiles.filePath = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/shapeFiles"
+# Directories to export the final results into.
+fin2.wd = "~/WRR Submission 2 Data/Script 2"
+fin3.wd = "~/WRR Submission 2 Data/Script 3"
+fin4.wd = "~/WRR Submission 2 Data/Script 4"
+fin5.wd = "~/WRR Submission 2 Data/Script 5"
+
+#Name of file for lake shapefiles & island polygon shapefiles
 lakes.shapeFile = "mackenzieGoodLakes.shp"
 islands.shapeFile = "vectorIslandArea2.shp"
-setwd(shapeFiles.filePath)
+setwd(int.wd)
 lakes.sf = st_read(lakes.shapeFile)
 islands.sf=st_read(islands.shapeFile)
-images.wd = "C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/images"
+images.wd = "~/images"
 
-# 
-# # Name of file and folder for GECI validation data
-valFile.path="C:/Users/whyana/OneDrive/DocumentsLaptop/001_GraduateSchool/Research/Connectivity/Mackenzie/Data/GEE Downloads/trainingData"
+# # Name of file for GECI validation data
 valFileName = "trainingData_1819lakes.shp"
 ```
 
@@ -132,7 +135,7 @@ prep.2020= lakes.filt %>%filter(year==2020) %>%
 ## Enact random forest classification - includes code for Supplemental Figure 4
 ```{r}
 # Import training/testing data into the script, break our much larger classification scheme into 3 classes
-setwd(valFile.path)
+setwd(int.wd)
 lake.class = st_read(valFileName , stringsAsFactors = F) %>% as_tibble() %>% 
   rename(OBJECTID=ID) %>% 
   group_by(OBJECTID) %>% mutate(row.num=row_number()) %>% filter(row.num==1) %>% 
@@ -392,7 +395,13 @@ all.classified = cbind(predict(fitted.wf.rf, prep.all), prep.all) %>% as_tibble(
   left_join(lakes.sf %>% dplyr::select(-count), by="OBJECTID") %>% arrange(year, month)
 final.class = all.classified %>% select(-geometry)
 
-setwd(int.wd)
+# Export final results to all other folders for use in other scripts
+setwd(fin2.wd)
 write_feather(final.class,paste0("final.class_", todayDate, ".feather"))
-
+setwd(fin3.wd)
+write_feather(final.class,paste0("final.class_", todayDate, ".feather"))
+setwd(fin4.wd)
+write_feather(final.class,paste0("final.class_", todayDate, ".feather"))
+setwd(fin5.wd)
+write_feather(final.class,paste0("final.class_", todayDate, ".feather"))
 ```
